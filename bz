@@ -28,6 +28,7 @@ Commands:
   new              Create a new project from a brief
   launch           Spawn all agents and supervisor
   status           Show agent states
+  feedback         Send human feedback to a zombie
   logs <agent>     Tail agent output
   attach <agent>   Attach to agent tmux session
   teardown         Stop all agents gracefully
@@ -531,6 +532,145 @@ cmd_clean() {
     echo ""
 }
 
+# ── FEEDBACK ─────────────────────────────────────
+
+cmd_feedback() {
+    local target="${1:-}"
+    shift 2>/dev/null || true
+    local message="$*"
+
+    require_config
+
+    # Interactive mode if no args
+    if [[ -z "$target" ]]; then
+        echo ""
+        echo "  ${BOLD}📢 bz — Send Feedback${NC}"
+        echo ""
+
+        # Show available agents
+        echo "  Available zombies:"
+        for agent_dir in "${BZ_DIR}/agents"/*/; do
+            [[ -d "$agent_dir" ]] || continue
+            local aid
+            aid="$(basename "$agent_dir")"
+            local state
+            state="$(grep '^State:' "${agent_dir}/STATUS.md" 2>/dev/null | head -1 | sed 's/State: //')"
+            echo "    ${aid} (${state})"
+        done
+        echo ""
+
+        printf "  Send to which zombie? "
+        read -r target
+        [[ -z "$target" ]] && { err "No target specified."; exit 1; }
+
+        printf "  Feedback message: "
+        read -r message
+        [[ -z "$message" ]] && { err "No message."; exit 1; }
+    fi
+
+    if [[ -z "$message" ]]; then
+        err "Usage: bz feedback <agent> <message>"
+        err "   or: bz feedback  (interactive)"
+        exit 1
+    fi
+
+    local sess
+    sess="$(session_name "$target")"
+
+    # Check if zombie session exists AND CLI is still running (not just a shell prompt)
+    local cli_running=0
+    if tmux has-session -t "$sess" 2>/dev/null; then
+        # Check if claude/codex process is running in the tmux pane
+        local pane_pid
+        pane_pid="$(tmux list-panes -t "$sess" -F '#{pane_pid}' 2>/dev/null | head -1)"
+        if [[ -n "$pane_pid" ]] && pgrep -P "$pane_pid" -f "claude|codex|aider" >/dev/null 2>&1; then
+            cli_running=1
+        fi
+    fi
+
+    if [[ "$cli_running" -eq 0 ]]; then
+        # Zombie finished — need to restart it with feedback
+        warn "Zombie '${target}' CLI not running. Restarting with feedback..."
+        tmux kill-session -t "$sess" 2>/dev/null || true
+
+        local cli_cmd model
+        cli_cmd="$(read_yaml_agent_field "$target" "runtime" < /dev/null)"
+        model="$(read_yaml_agent_field "$target" "model" < /dev/null)"
+        case "$cli_cmd" in
+            claude|claude-code) cli_cmd="claude" ;;
+            codex) cli_cmd="codex" ;;
+        esac
+
+        # Determine work directory
+        local work_dir="."
+        local wt_path
+        wt_path="$(worktree_path "$target")"
+        [[ -d "$wt_path" ]] && work_dir="$wt_path"
+
+        # Update STATUS.md to working
+        local status_file="${BZ_DIR}/agents/${target}/STATUS.md"
+        cat > "$status_file" << STATUSEOF
+# STATUS.md
+State: working
+Summary: Reopened for human feedback.
+Files touched: pending
+Next step: Address feedback.
+Blocker: none
+Last updated: $(date '+%Y-%m-%d %H:%M')
+STATUSEOF
+
+        local prompt="HUMAN FEEDBACK — act on this immediately:
+
+${message}
+
+Read your previous work in the worktree, apply the fix, commit with [${target}] prefix, and update .bz/agents/${target}/STATUS.md to done when finished."
+
+        tmux new-session -d -s "$sess" -x 200 -y 50
+        local cmd
+        if [[ "$cli_cmd" == "claude" ]]; then
+            cmd="cd $(realpath "$work_dir") && claude --dangerously-skip-permissions"
+            [[ -n "$model" ]] && cmd="$cmd --model $model"
+            cmd="$cmd -p '${prompt}'"
+        elif [[ "$cli_cmd" == "codex" ]]; then
+            cmd="cd $(realpath "$work_dir") && codex"
+            [[ -n "$model" ]] && cmd="$cmd --model $model"
+            cmd="$cmd --full-auto -q '${prompt}'"
+        else
+            cmd="cd $(realpath "$work_dir") && ${cli_cmd} '${prompt}'"
+        fi
+
+        tmux send-keys -t "$sess" "$cmd" Enter
+        ok "Restarted ${target} with feedback"
+    else
+        # Zombie still running — send feedback into active session
+        tmux send-keys -t "$sess" "HUMAN FEEDBACK: ${message}" Enter
+        ok "Sent feedback to ${target}"
+    fi
+
+    # Log feedback
+    mkdir -p "${BZ_DIR}/logs"
+    echo "$(date -Iseconds) | target=${target} | ${message}" >> "${BZ_DIR}/logs/feedback.log"
+
+    echo ""
+    info "Monitor with: bz status"
+    echo ""
+}
+
+# Helper: read a field for a specific agent by id
+read_yaml_agent_field() {
+    local target_id="$1"
+    local field="$2"
+    python3 -c "
+import yaml
+with open('bz.yaml') as f:
+    data = yaml.safe_load(f)
+for a in data.get('agents', []):
+    if a.get('id') == '${target_id}':
+        print(a.get('${field}', ''))
+        break
+" 2>/dev/null
+}
+
 # ── MAIN ─────────────────────────────────────────
 
 case "${1:-}" in
@@ -539,6 +679,7 @@ case "${1:-}" in
     status)    shift; cmd_status "$@" ;;
     attach)    shift; cmd_attach "$@" ;;
     logs)      shift; cmd_logs "$@" ;;
+    feedback)  shift; cmd_feedback "$@" ;;
     teardown)  shift; cmd_teardown "$@" ;;
     clean)     shift; cmd_clean "$@" ;;
     -v|--version) echo "bz v${VERSION}" ;;
