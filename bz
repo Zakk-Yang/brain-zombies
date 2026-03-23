@@ -310,6 +310,14 @@ CRITICAL RULES:
 2. After each commit: update ${BZ_DIR}/agents/${agent_id}/STATUS.md with current State (working/blocked/done), Summary, Files touched, Next step
 3. When fully complete: set State: done in STATUS.md
 
+CONTEXT MANAGEMENT — keep your memory lean:
+- Do NOT read files you don't need. Only read files relevant to your current step.
+- Do NOT re-read files you already read. Remember what's in them.
+- Do NOT cat large files — use grep or head to find what you need.
+- Write files in one shot — don't read-modify-write when you can just write.
+- Keep STATUS.md updates short — one-line summary, not paragraphs.
+- If you receive a brain message, act on it immediately without re-reading everything.
+
 START NOW."
 
         # Spawn tmux session
@@ -373,8 +381,8 @@ cmd_status() {
         return
     fi
 
-    printf "  ${BOLD}%-20s %-12s %-60s${NC}\n" "Agent" "State" "Summary"
-    printf "  %-20s %-12s %-60s\n" "────────────────────" "──────────" "────────────────────────────────────────────────────"
+    printf "  ${BOLD}%-16s %-10s %-8s %-50s${NC}\n" "Agent" "State" "Ctx" "Summary"
+    printf "  %-16s %-10s %-8s %-50s\n" "────────────────" "──────────" "────────" "──────────────────────────────────────────────────"
 
     for agent_dir in "${BZ_DIR}/agents"/*/; do
         [[ -d "$agent_dir" ]] || continue
@@ -383,13 +391,30 @@ cmd_status() {
         local status_file="${agent_dir}/STATUS.md"
 
         if [[ ! -f "$status_file" ]]; then
-            printf "  %-20s %-12s %-60s\n" "$agent_id" "unknown" "No STATUS.md"
+            printf "  %-16s %-10s %-8s %-50s\n" "$agent_id" "unknown" "-" "No STATUS.md"
             continue
         fi
 
-        local state summary
+        local state summary ctx_display
         state="$(grep '^State:' "$status_file" 2>/dev/null | head -1 | sed 's/State: //')"
-        summary="$(grep '^Summary:' "$status_file" 2>/dev/null | head -1 | sed 's/Summary: //' | cut -c1-58)"
+        summary="$(grep '^Summary:' "$status_file" 2>/dev/null | head -1 | sed 's/Summary: //' | cut -c1-48)"
+
+        # Estimate context usage from tmux pane output
+        local sess
+        sess="$(session_name "$agent_id")"
+        ctx_display="-"
+        if tmux has-session -t "$sess" 2>/dev/null; then
+            local pane_lines
+            pane_lines="$(tmux capture-pane -t "$sess" -p -S - 2>/dev/null | wc -c)"
+            local est_tokens=$((pane_lines / 4))  # rough: 4 chars ≈ 1 token
+            if [[ "$est_tokens" -gt 100000 ]]; then
+                ctx_display="${RED}$(( est_tokens / 1000 ))k${NC}"
+            elif [[ "$est_tokens" -gt 50000 ]]; then
+                ctx_display="${YELLOW}$(( est_tokens / 1000 ))k${NC}"
+            else
+                ctx_display="${GREEN}$(( est_tokens / 1000 ))k${NC}"
+            fi
+        fi
 
         local color="$NC"
         case "$state" in
@@ -399,7 +424,7 @@ cmd_status() {
             *) color="$RED" ;;
         esac
 
-        printf "  %-20s ${color}%-12s${NC} %-60s\n" "$agent_id" "$state" "$summary"
+        printf "  %-16s ${color}%-10s${NC} ${ctx_display}%-2s %-50s\n" "$agent_id" "$state" "" "$summary"
     done
 
     # Show tmux sessions
