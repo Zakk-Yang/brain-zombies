@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>brain-zombies</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #0a0e17; color: #c8d0da; min-height: 100vh; }
+
+header { padding: 1.2rem 1.5rem 0.8rem; border-bottom: 1px solid #1e2d3d; display: flex; justify-content: space-between; align-items: center; }
+header h1 { font-size: 1.3rem; color: #fff; }
+header h1 span { opacity: 0.5; font-weight: 400; font-size: 0.9rem; }
+.updated { font-size: 0.75rem; color: #556; }
+
+main { max-width: 1200px; margin: 0 auto; padding: 1rem; }
+
+/* Project bar */
+.project-bar { display: flex; gap: 1.5rem; padding: 0.8rem 1rem; background: #111827; border-radius: 8px; margin-bottom: 1rem; flex-wrap: wrap; }
+.project-bar .stat { text-align: center; }
+.project-bar .stat-value { font-size: 1.3rem; font-weight: 700; color: #fff; }
+.project-bar .stat-label { font-size: 0.7rem; color: #556; text-transform: uppercase; letter-spacing: 0.5px; }
+
+/* Brain panel */
+.brain-panel { background: #111827; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; border-left: 3px solid #a78bfa; }
+.brain-panel h2 { font-size: 0.9rem; color: #a78bfa; margin-bottom: 0.5rem; }
+.brain-meta { display: flex; gap: 1.5rem; font-size: 0.8rem; color: #8899aa; flex-wrap: wrap; }
+
+/* Zombie grid */
+.zombie-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 0.8rem; margin-bottom: 1rem; }
+.zombie-card { background: #111827; border-radius: 8px; padding: 1rem; border-left: 3px solid #3b82f6; }
+.zombie-card.done { border-left-color: #22c55e; }
+.zombie-card.blocked { border-left-color: #eab308; }
+.zombie-card.stuck { border-left-color: #ef4444; }
+.zombie-card.crashed { border-left-color: #ef4444; border-left-style: dashed; }
+
+.zombie-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem; }
+.zombie-name { font-weight: 700; color: #fff; font-size: 1rem; }
+.zombie-phase { font-size: 0.75rem; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+.phase-starting { background: #1e3a5f; color: #60a5fa; }
+.phase-planning { background: #1e3a5f; color: #60a5fa; }
+.phase-blocked { background: #3d2e00; color: #eab308; }
+.phase-coding { background: #1a2e1a; color: #4ade80; }
+.phase-testing { background: #2e1a3d; color: #c084fc; }
+.phase-review { background: #3d2e00; color: #eab308; }
+.phase-done { background: #0f2a0f; color: #22c55e; }
+.phase-unknown { background: #1e1e1e; color: #666; }
+
+.health-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+.health-healthy { background: #22c55e; }
+.health-slow { background: #eab308; }
+.health-stuck { background: #ef4444; }
+.health-crashed { background: #ef4444; animation: blink 1s infinite; }
+.health-idle { background: #6b7280; }
+@keyframes blink { 50% { opacity: 0.3; } }
+
+.zombie-meta { font-size: 0.78rem; color: #8899aa; line-height: 1.6; }
+.zombie-meta .label { color: #556; }
+.zombie-summary { font-size: 0.82rem; color: #c8d0da; margin: 0.5rem 0; padding: 0.4rem 0.6rem; background: #0a0e17; border-radius: 4px; }
+.zombie-message { font-size: 0.75rem; color: #60a5fa; margin-top: 0.4rem; font-style: italic; }
+
+/* Context bar */
+.ctx-bar { height: 4px; background: #1e2d3d; border-radius: 2px; margin: 0.4rem 0; overflow: hidden; }
+.ctx-fill { height: 100%; border-radius: 2px; transition: width 0.3s; }
+.ctx-fill.low { background: #22c55e; }
+.ctx-fill.mid { background: #eab308; }
+.ctx-fill.high { background: #ef4444; }
+
+/* Cost bar */
+.cost-bar { display: flex; gap: 1rem; padding: 0.6rem 1rem; background: #111827; border-radius: 8px; margin-bottom: 1rem; font-size: 0.8rem; flex-wrap: wrap; }
+.cost-item { color: #8899aa; }
+.cost-item strong { color: #22c55e; }
+
+/* Message log */
+.log-panel { background: #0d1117; border: 1px solid #1e2d3d; border-radius: 8px; max-height: 350px; overflow-y: auto; }
+.log-panel h2 { font-size: 0.85rem; color: #556; padding: 0.6rem 1rem; border-bottom: 1px solid #1e2d3d; position: sticky; top: 0; background: #0d1117; }
+.log-entry { padding: 0.25rem 1rem; font-size: 0.75rem; font-family: monospace; border-bottom: 1px solid #0a0e17; display: flex; gap: 0.8rem; }
+.log-entry:hover { background: #111827; }
+.log-time { color: #4a5568; min-width: 65px; }
+.log-source { min-width: 100px; font-weight: 600; }
+.log-source.brain { color: #a78bfa; }
+.log-source.zombie { color: #60a5fa; }
+.log-source.human { color: #f59e0b; }
+.log-msg { color: #c8d0da; }
+.log-msg.commit { color: #22c55e; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🧠🧟 brain-zombies <span id="project-name"></span></h1>
+  <div class="updated" id="updated"></div>
+</header>
+<main>
+  <div class="project-bar" id="project-bar"></div>
+  <div class="brain-panel" id="brain-panel"></div>
+  <div class="zombie-grid" id="zombie-grid"></div>
+  <div class="cost-bar" id="cost-bar"></div>
+  <div class="log-panel" id="log-panel"><h2>Message Log</h2><div id="log-entries"></div></div>
+</main>
+<script>
+function phaseClass(p) { return `phase-${p || 'unknown'}`; }
+function healthDot(h) { return `<span class="health-dot health-${h}"></span>${h}`; }
+function ctxClass(pct) { return pct > 70 ? 'high' : pct > 40 ? 'mid' : 'low'; }
+function sourceClass(s) {
+  if (s.includes('BRAIN') || s.includes('nerve')) return 'brain';
+  if (s.includes('HUMAN')) return 'human';
+  return 'zombie';
+}
+
+function render(data) {
+  document.getElementById('project-name').textContent = `— ${data.project.name}`;
+  document.getElementById('updated').textContent = `Updated ${data.updated_at}`;
+
+  // Project bar
+  document.getElementById('project-bar').innerHTML = `
+    <div class="stat"><div class="stat-value">${data.project.state.toUpperCase()}</div><div class="stat-label">Status</div></div>
+    <div class="stat"><div class="stat-value">${data.project.zombies_done}/${data.project.zombies_total}</div><div class="stat-label">Zombies Done</div></div>
+    <div class="stat"><div class="stat-value">${data.project.total_commits}</div><div class="stat-label">Commits</div></div>
+    <div class="stat"><div class="stat-value">${data.project.elapsed_display}</div><div class="stat-label">Elapsed</div></div>
+    <div class="stat"><div class="stat-value">$${data.cost.total.toFixed(2)}</div><div class="stat-label">Total Cost</div></div>
+  `;
+
+  // Brain
+  document.getElementById('brain-panel').innerHTML = `
+    <h2>🧠 Brain (Supervisor)</h2>
+    <div class="brain-meta">
+      <span>${data.brain.runtime}/${data.brain.model}</span>
+      <span>Status: ${data.brain.status}</span>
+      <span>Tokens: ${(data.brain.tokens/1000).toFixed(1)}k</span>
+      <span>Cost: $${data.brain.estimated_cost.toFixed(3)}</span>
+    </div>
+  `;
+
+  // Zombies
+  let html = '';
+  for (const z of data.zombies) {
+    const cardClass = z.health === 'crashed' ? 'crashed' : z.health === 'stuck' ? 'stuck' : z.phase === 'blocked' ? 'blocked' : z.phase === 'done' ? 'done' : '';
+    html += `
+      <div class="zombie-card ${cardClass}">
+        <div class="zombie-header">
+          <span class="zombie-name">🧟 ${z.id}</span>
+          <span class="zombie-phase ${phaseClass(z.phase)}">${z.phase}</span>
+        </div>
+        <div class="zombie-meta">
+          <span class="label">Runtime:</span> ${z.runtime}/${z.model}<br>
+          <span class="label">Health:</span> ${healthDot(z.health)}<br>
+          <span class="label">Commits:</span> ${z.commit_count} <span class="label">Files:</span> ${z.files}
+        </div>
+        <div class="ctx-bar"><div class="ctx-fill ${ctxClass(z.context_pct)}" style="width:${Math.min(z.context_pct, 100)}%"></div></div>
+        <div class="zombie-meta"><span class="label">Context:</span> ${(z.context_tokens/1000).toFixed(1)}k (${z.context_pct}%) · <span class="label">Cost:</span> $${z.estimated_cost.toFixed(3)}</div>
+        <div class="zombie-summary">${z.summary}</div>
+        ${z.next_step ? `<div class="zombie-meta"><span class="label">Next:</span> ${z.next_step}</div>` : ''}
+      </div>
+    `;
+  }
+  document.getElementById('zombie-grid').innerHTML = html;
+
+  // Cost
+  let costHtml = `<span class="cost-item">🧠 Brain: <strong>$${data.cost.brain.toFixed(3)}</strong></span>`;
+  for (const z of data.zombies) {
+    costHtml += `<span class="cost-item">🧟 ${z.id}: <strong>$${z.estimated_cost.toFixed(3)}</strong></span>`;
+  }
+  costHtml += `<span class="cost-item">Total: <strong>$${data.cost.total.toFixed(2)}</strong></span>`;
+  document.getElementById('cost-bar').innerHTML = costHtml;
+
+  // Messages
+  let logHtml = '';
+  for (const m of data.messages) {
+    const sc = sourceClass(m.source);
+    const mc = m.message.startsWith('COMMIT') ? 'commit' : '';
+    logHtml += `<div class="log-entry"><span class="log-time">${m.time}</span><span class="log-source ${sc}">${m.source}</span><span class="log-msg ${mc}">${m.message}</span></div>`;
+  }
+  document.getElementById('log-entries').innerHTML = logHtml;
+  // Auto-scroll to bottom
+  const logPanel = document.getElementById('log-panel');
+  logPanel.scrollTop = logPanel.scrollHeight;
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/status');
+    const data = await res.json();
+    render(data);
+  } catch (e) {
+    console.error('Refresh failed:', e);
+  }
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

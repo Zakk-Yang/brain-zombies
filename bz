@@ -29,6 +29,7 @@ Commands:
   auth             Check & setup CLI authentication
   launch           Spawn all agents and supervisor
   status           Show agent states
+  dashboard        Open monitoring dashboard
   feedback         Send human feedback to a zombie
   logs <agent>     Tail agent output
   attach <agent>   Attach to agent tmux session
@@ -439,10 +440,20 @@ START NOW."
     echo ""
     echo "  ${GREEN}${BOLD}Agents launched!${NC}"
     echo ""
+
+    # Offer dashboard
+    printf "  Start dashboard? [Y/n]: "
+    read -r dash_answer
+    if [[ ! "$dash_answer" =~ ^[Nn] ]]; then
+        cmd_dashboard
+    fi
+
+    echo ""
     echo "  ${BOLD}Commands:${NC}"
     echo "    bz status          Show agent states"
+    echo "    bz dashboard       Open monitoring dashboard"
+    echo "    bz feedback        Send human feedback"
     echo "    bz attach <agent>  Attach to agent session"
-    echo "    bz logs <agent>    Watch agent output"
     echo "    bz teardown        Stop everything"
     echo ""
 }
@@ -567,6 +578,13 @@ cmd_teardown() {
     echo ""
     echo "  ${BOLD}Tearing down ${project}...${NC}"
 
+    # Kill dashboard
+    if [[ -f "${BZ_DIR}/dashboard.pid" ]]; then
+        kill "$(cat "${BZ_DIR}/dashboard.pid")" 2>/dev/null || true
+        rm -f "${BZ_DIR}/dashboard.pid"
+        ok "Dashboard stopped"
+    fi
+
     # Kill reconcile loop
     if [[ -f "${BZ_DIR}/reconcile.pid" ]]; then
         kill "$(cat "${BZ_DIR}/reconcile.pid")" 2>/dev/null || true
@@ -582,6 +600,25 @@ cmd_teardown() {
 
     ok "Teardown complete"
     echo ""
+}
+
+# ── DASHBOARD ────────────────────────────────────
+
+cmd_dashboard() {
+    require_config
+    local port="${1:-3333}"
+    local dash_pid_file="${BZ_DIR}/dashboard.pid"
+
+    # Kill existing dashboard
+    if [[ -f "$dash_pid_file" ]]; then
+        kill "$(cat "$dash_pid_file")" 2>/dev/null || true
+    fi
+    lsof -ti:"$port" 2>/dev/null | xargs kill 2>/dev/null || true
+    sleep 1
+
+    nohup python3 "${SCRIPT_DIR}/dashboard/server.py" "$port" "$(pwd)" > "${BZ_DIR}/logs/dashboard.log" 2>&1 &
+    echo $! > "$dash_pid_file"
+    ok "Dashboard at http://localhost:${port}"
 }
 
 # ── CLEAN ────────────────────────────────────────
@@ -833,6 +870,7 @@ case "${1:-}" in
     auth)      shift; cmd_auth "$@" ;;
     launch)    shift; cmd_launch "$@" ;;
     status)    shift; cmd_status "$@" ;;
+    dashboard) shift; cmd_dashboard "$@" ;;
     attach)    shift; cmd_attach "$@" ;;
     logs)      shift; cmd_logs "$@" ;;
     feedback)  shift; cmd_feedback "$@" ;;
