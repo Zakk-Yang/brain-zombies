@@ -1,0 +1,521 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.1.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BZ_DIR=".bz"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+info()  { printf "${BLUE}[i]${NC} %s\n" "$*"; }
+ok()    { printf "${GREEN}[✓]${NC} %s\n" "$*"; }
+warn()  { printf "${YELLOW}[!]${NC} %s\n" "$*"; }
+err()   { printf "${RED}[✗]${NC} %s\n" "$*" >&2; }
+
+usage() {
+    cat <<EOF
+${BOLD}bz${NC} v${VERSION} — Brain for your coding agents
+
+Usage: bz <command> [options]
+
+Commands:
+  new              Create a new project from a brief
+  launch           Spawn all agents and supervisor
+  status           Show agent states
+  logs <agent>     Tail agent output
+  attach <agent>   Attach to agent tmux session
+  teardown         Stop all agents gracefully
+  clean            Full purge (kill + delete state)
+
+Options:
+  -h, --help       Show this help
+  -v, --version    Show version
+
+Examples:
+  bz new --brief PROJECT_BRIEF.md
+  bz launch
+  bz status
+  bz attach developer
+  bz teardown
+EOF
+}
+
+# ── Helpers ──────────────────────────────────────
+
+require_config() {
+    if [[ ! -f "bz.yaml" ]]; then
+        err "No bz.yaml found. Run 'bz new' first."
+        exit 1
+    fi
+}
+
+read_yaml() {
+    python3 -c "
+import yaml, sys
+with open('bz.yaml') as f:
+    data = yaml.safe_load(f)
+path = sys.argv[1].split('.')
+val = data
+for p in path:
+    if isinstance(val, list):
+        val = val[int(p)]
+    else:
+        val = val.get(p, '')
+print(val if val is not None else '')
+" "$1" 2>/dev/null
+}
+
+read_yaml_list() {
+    python3 -c "
+import yaml
+with open('bz.yaml') as f:
+    data = yaml.safe_load(f)
+agents = data.get('agents', [])
+for a in agents:
+    print(a.get('id', ''))
+" 2>/dev/null
+}
+
+project_name() {
+    read_yaml "project.name"
+}
+
+session_name() {
+    echo "bz-$(project_name)-$1"
+}
+
+worktree_path() {
+    echo "${BZ_DIR}/worktrees/$1"
+}
+
+# ── NEW ──────────────────────────────────────────
+
+cmd_new() {
+    local brief_file=""
+    local auto_yes=0
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --brief|-b) brief_file="$2"; shift 2 ;;
+            -y) auto_yes=1; shift ;;
+            *) err "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+
+    if [[ -f "bz.yaml" ]]; then
+        warn "bz.yaml already exists. Overwrite? [y/N]"
+        read -r answer
+        [[ "$answer" =~ ^[Yy] ]] || exit 0
+    fi
+
+    echo ""
+    echo "  ${BOLD}🧠 bz — New Project${NC}"
+    echo ""
+
+    # Read brief
+    local brief=""
+    if [[ -n "$brief_file" && -f "$brief_file" ]]; then
+        brief="$(cat "$brief_file")"
+        info "Read brief from $brief_file"
+    else
+        echo "Paste your project brief (end with Ctrl-D):"
+        brief="$(cat)"
+    fi
+
+    if [[ -z "$brief" ]]; then
+        err "Empty brief. Provide a project description."
+        exit 1
+    fi
+
+    # Ask runtime preferences
+    local runtime="claude"
+    local model_tier="balanced"
+    local git_strategy="worktree"
+
+    if [[ "$auto_yes" -eq 0 ]]; then
+        echo ""
+        printf "Coding CLI? [${BOLD}claude${NC} / codex / aider]: "
+        read -r answer
+        [[ -n "$answer" ]] && runtime="$answer"
+
+        printf "Model tier? [budget / ${BOLD}balanced${NC} / quality]: "
+        read -r answer
+        [[ -n "$answer" ]] && model_tier="$answer"
+
+        printf "Git strategy? [${BOLD}worktree${NC} / shared]: "
+        read -r answer
+        [[ -n "$answer" ]] && git_strategy="$answer"
+    fi
+
+    # Map runtime to CLI command
+    local cli_cmd
+    case "$runtime" in
+        claude|claude-code) cli_cmd="claude" ;;
+        codex) cli_cmd="codex" ;;
+        aider) cli_cmd="aider" ;;
+        *) cli_cmd="$runtime" ;;
+    esac
+
+    # Map model tier to model names
+    local supervisor_model agent_model
+    case "$cli_cmd" in
+        claude)
+            case "$model_tier" in
+                budget)   supervisor_model="haiku"; agent_model="haiku" ;;
+                balanced) supervisor_model="sonnet"; agent_model="sonnet" ;;
+                quality)  supervisor_model="opus"; agent_model="opus" ;;
+            esac
+            ;;
+        codex)
+            case "$model_tier" in
+                budget)   supervisor_model="gpt-4.1-mini"; agent_model="gpt-4.1-mini" ;;
+                balanced) supervisor_model="gpt-4.1"; agent_model="gpt-4.1" ;;
+                quality)  supervisor_model="gpt-5.4"; agent_model="gpt-5.4" ;;
+            esac
+            ;;
+        *)
+            supervisor_model=""; agent_model=""
+            ;;
+    esac
+
+    info "Generating project config with ${cli_cmd}..."
+
+    # Use the supervisor CLI to analyze the brief and generate config
+    source "${SCRIPT_DIR}/lib/planner.sh"
+    generate_config "$brief" "$cli_cmd" "$supervisor_model" "$agent_model" "$git_strategy"
+
+    ok "Generated bz.yaml"
+    echo ""
+    cat bz.yaml
+    echo ""
+
+    if [[ "$auto_yes" -eq 0 ]]; then
+        printf "Launch now? [Y/n]: "
+        read -r answer
+        [[ "$answer" =~ ^[Nn] ]] || cmd_launch
+    fi
+}
+
+# ── LAUNCH ───────────────────────────────────────
+
+cmd_launch() {
+    require_config
+    local project
+    project="$(project_name)"
+
+    echo ""
+    echo "  ${BOLD}🚀 bz — Launch${NC}"
+    echo "  Project: ${project}"
+    echo ""
+
+    mkdir -p "${BZ_DIR}/agents" "${BZ_DIR}/logs"
+
+    # Initialize git if needed
+    if [[ ! -d ".git" ]]; then
+        git init -q
+        git add -A
+        git commit -q -m "Initial commit"
+        ok "Git initialized"
+    fi
+
+    local git_strategy
+    git_strategy="$(read_yaml 'git.strategy')"
+
+    # Spawn each agent
+    local agents
+    agents="$(read_yaml_list)"
+    local agent_index=0
+
+    while IFS= read -r agent_id; do
+        [[ -z "$agent_id" ]] && continue
+
+        local runtime cli_cmd model task focus blocked_until
+        runtime="$(read_yaml "agents.${agent_index}.runtime")"
+        model="$(read_yaml "agents.${agent_index}.model")"
+        task="$(read_yaml "agents.${agent_index}.task")"
+        focus="$(read_yaml "agents.${agent_index}.focus")"
+        blocked_until="$(read_yaml "agents.${agent_index}.blocked_until")"
+
+        case "$runtime" in
+            claude|claude-code) cli_cmd="claude" ;;
+            codex) cli_cmd="codex" ;;
+            *) cli_cmd="$runtime" ;;
+        esac
+
+        # Create agent dir
+        local agent_dir="${BZ_DIR}/agents/${agent_id}"
+        mkdir -p "${agent_dir}"
+
+        # Write BRIEF.md
+        cat > "${agent_dir}/BRIEF.md" << BRIEFEOF
+# Agent: ${agent_id}
+
+## Task
+${task}
+
+## Focus directories
+${focus}
+
+## Rules
+- After EACH file you create/modify: git add <file> && git commit -m "[${agent_id}] <description>"
+- Update ${BZ_DIR}/agents/${agent_id}/STATUS.md after each commit
+- Set State: done when your task is complete
+$([ -n "$blocked_until" ] && echo "- You are BLOCKED until: ${blocked_until}. Set State: blocked until the condition is met.")
+BRIEFEOF
+
+        # Write initial STATUS.md
+        cat > "${agent_dir}/STATUS.md" << STATUSEOF
+# STATUS.md
+State: starting
+Summary: Not started yet.
+Files touched: none
+Next step: Read BRIEF.md and begin task.
+Blocker: ${blocked_until:-none}
+Last updated: $(date '+%Y-%m-%d %H:%M')
+STATUSEOF
+
+        # Create worktree if needed
+        local work_dir="."
+        if [[ "$git_strategy" == "worktree" ]]; then
+            local wt_path
+            wt_path="$(worktree_path "$agent_id")"
+            local branch="bz/${agent_id}"
+
+            if [[ -d "$wt_path" ]]; then
+                git worktree remove "$wt_path" --force 2>/dev/null || true
+            fi
+            git branch -D "$branch" 2>/dev/null || true
+            git worktree add -q "$wt_path" -b "$branch" 2>/dev/null || true
+            # Copy agent state to worktree
+            mkdir -p "${wt_path}/${BZ_DIR}/agents/${agent_id}"
+            cp "${agent_dir}/BRIEF.md" "${wt_path}/${BZ_DIR}/agents/${agent_id}/"
+            cp "${agent_dir}/STATUS.md" "${wt_path}/${BZ_DIR}/agents/${agent_id}/"
+            work_dir="$wt_path"
+            ok "Created worktree: ${branch}"
+        fi
+
+        # Build agent prompt
+        local prompt="You are an autonomous coding agent named '${agent_id}'. Execute your task NOW without asking questions.
+
+Read ${BZ_DIR}/agents/${agent_id}/BRIEF.md for your task.
+
+CRITICAL RULES:
+1. After EACH file: git add <file> && git commit -m \"[${agent_id}] <description>\"
+2. After each commit: update ${BZ_DIR}/agents/${agent_id}/STATUS.md with current State (working/blocked/done), Summary, Files touched, Next step
+3. When fully complete: set State: done in STATUS.md
+
+START NOW."
+
+        # Spawn tmux session
+        local sess
+        sess="$(session_name "$agent_id")"
+        tmux kill-session -t "$sess" 2>/dev/null || true
+
+        local cmd
+        if [[ "$cli_cmd" == "claude" ]]; then
+            cmd="cd $(realpath "$work_dir") && claude --dangerously-skip-permissions"
+            [[ -n "$model" ]] && cmd="$cmd --model $model"
+            cmd="$cmd -p '${prompt}'"
+        elif [[ "$cli_cmd" == "codex" ]]; then
+            cmd="cd $(realpath "$work_dir") && codex"
+            [[ -n "$model" ]] && cmd="$cmd --model $model"
+            cmd="$cmd --full-auto -q '${prompt}'"
+        else
+            cmd="cd $(realpath "$work_dir") && ${cli_cmd} '${prompt}'"
+        fi
+
+        tmux new-session -d -s "$sess" -x 200 -y 50
+        tmux send-keys -t "$sess" "$cmd" Enter
+        ok "Spawned ${agent_id} (${cli_cmd}/${model}) → tmux: ${sess}"
+
+        agent_index=$((agent_index + 1))
+    done
+
+    # Start reconcile loop
+    local reconcile_pid_file="${BZ_DIR}/reconcile.pid"
+    if [[ -f "$reconcile_pid_file" ]]; then
+        kill "$(cat "$reconcile_pid_file")" 2>/dev/null || true
+    fi
+    nohup bash "${SCRIPT_DIR}/lib/reconcile.sh" "$(pwd)" > "${BZ_DIR}/logs/reconcile.log" 2>&1 &
+    echo $! > "$reconcile_pid_file"
+    ok "Reconcile loop started (PID: $!)"
+
+    echo ""
+    echo "  ${GREEN}${BOLD}Agents launched!${NC}"
+    echo ""
+    echo "  ${BOLD}Commands:${NC}"
+    echo "    bz status          Show agent states"
+    echo "    bz attach <agent>  Attach to agent session"
+    echo "    bz logs <agent>    Watch agent output"
+    echo "    bz teardown        Stop everything"
+    echo ""
+}
+
+# ── STATUS ───────────────────────────────────────
+
+cmd_status() {
+    require_config
+    local project
+    project="$(project_name)"
+
+    echo ""
+    echo "  ${BOLD}🧠 bz — ${project}${NC}"
+    echo ""
+
+    if [[ ! -d "${BZ_DIR}/agents" ]]; then
+        warn "No agents found. Run 'bz launch' first."
+        return
+    fi
+
+    printf "  ${BOLD}%-20s %-12s %-60s${NC}\n" "Agent" "State" "Summary"
+    printf "  %-20s %-12s %-60s\n" "────────────────────" "──────────" "────────────────────────────────────────────────────"
+
+    for agent_dir in "${BZ_DIR}/agents"/*/; do
+        [[ -d "$agent_dir" ]] || continue
+        local agent_id
+        agent_id="$(basename "$agent_dir")"
+        local status_file="${agent_dir}/STATUS.md"
+
+        if [[ ! -f "$status_file" ]]; then
+            printf "  %-20s %-12s %-60s\n" "$agent_id" "unknown" "No STATUS.md"
+            continue
+        fi
+
+        local state summary
+        state="$(grep '^State:' "$status_file" 2>/dev/null | head -1 | sed 's/State: //')"
+        summary="$(grep '^Summary:' "$status_file" 2>/dev/null | head -1 | sed 's/Summary: //' | cut -c1-58)"
+
+        local color="$NC"
+        case "$state" in
+            done) color="$GREEN" ;;
+            working|planning) color="$BLUE" ;;
+            blocked) color="$YELLOW" ;;
+            *) color="$RED" ;;
+        esac
+
+        printf "  %-20s ${color}%-12s${NC} %-60s\n" "$agent_id" "$state" "$summary"
+    done
+
+    # Show tmux sessions
+    echo ""
+    local sessions
+    sessions="$(tmux list-sessions 2>/dev/null | grep "bz-$(project_name)" || true)"
+    if [[ -n "$sessions" ]]; then
+        info "Active tmux sessions:"
+        echo "$sessions" | while read -r line; do
+            echo "    $line"
+        done
+    fi
+    echo ""
+}
+
+# ── ATTACH ───────────────────────────────────────
+
+cmd_attach() {
+    local agent_id="${1:?Usage: bz attach <agent-id>}"
+    require_config
+    local sess
+    sess="$(session_name "$agent_id")"
+
+    if ! tmux has-session -t "$sess" 2>/dev/null; then
+        err "No session found for agent '${agent_id}'"
+        echo "Available sessions:"
+        tmux list-sessions 2>/dev/null | grep "bz-$(project_name)" || echo "  (none)"
+        exit 1
+    fi
+
+    info "Attaching to ${agent_id}. Detach with Ctrl-B then D."
+    tmux attach-session -t "$sess"
+}
+
+# ── LOGS ─────────────────────────────────────────
+
+cmd_logs() {
+    local agent_id="${1:?Usage: bz logs <agent-id>}"
+    require_config
+    local sess
+    sess="$(session_name "$agent_id")"
+
+    if ! tmux has-session -t "$sess" 2>/dev/null; then
+        err "No session found for agent '${agent_id}'"
+        exit 1
+    fi
+
+    tmux capture-pane -t "$sess" -p -S -100
+}
+
+# ── TEARDOWN ─────────────────────────────────────
+
+cmd_teardown() {
+    require_config
+    local project
+    project="$(project_name)"
+
+    echo ""
+    echo "  ${BOLD}Tearing down ${project}...${NC}"
+
+    # Kill reconcile loop
+    if [[ -f "${BZ_DIR}/reconcile.pid" ]]; then
+        kill "$(cat "${BZ_DIR}/reconcile.pid")" 2>/dev/null || true
+        rm -f "${BZ_DIR}/reconcile.pid"
+        ok "Reconcile loop stopped"
+    fi
+
+    # Kill tmux sessions
+    tmux list-sessions 2>/dev/null | grep "bz-${project}" | cut -d: -f1 | while read -r sess; do
+        tmux kill-session -t "$sess" 2>/dev/null || true
+        ok "Killed session: $sess"
+    done
+
+    ok "Teardown complete"
+    echo ""
+}
+
+# ── CLEAN ────────────────────────────────────────
+
+cmd_clean() {
+    require_config
+    local project
+    project="$(project_name)"
+
+    cmd_teardown
+
+    # Remove worktrees
+    if [[ -d "${BZ_DIR}/worktrees" ]]; then
+        for wt in "${BZ_DIR}/worktrees"/*/; do
+            [[ -d "$wt" ]] || continue
+            local branch="bz/$(basename "$wt")"
+            git worktree remove "$wt" --force 2>/dev/null || rm -rf "$wt"
+            git branch -D "$branch" 2>/dev/null || true
+        done
+        ok "Removed worktrees"
+    fi
+
+    rm -rf "${BZ_DIR}"
+    ok "Removed ${BZ_DIR}/"
+
+    echo ""
+    info "bz.yaml kept. Run 'bz launch' to restart."
+    echo ""
+}
+
+# ── MAIN ─────────────────────────────────────────
+
+case "${1:-}" in
+    new)       shift; cmd_new "$@" ;;
+    launch)    shift; cmd_launch "$@" ;;
+    status)    shift; cmd_status "$@" ;;
+    attach)    shift; cmd_attach "$@" ;;
+    logs)      shift; cmd_logs "$@" ;;
+    teardown)  shift; cmd_teardown "$@" ;;
+    clean)     shift; cmd_clean "$@" ;;
+    -v|--version) echo "bz v${VERSION}" ;;
+    -h|--help|"") usage ;;
+    *) err "Unknown command: $1"; usage; exit 1 ;;
+esac
