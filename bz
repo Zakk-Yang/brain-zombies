@@ -217,6 +217,63 @@ cmd_launch() {
 
     mkdir -p "${BZ_DIR}/agents" "${BZ_DIR}/logs"
 
+    # Preflight: check required CLIs are installed and authenticated
+    local required_runtimes=()
+    local -A checked_runtimes=()
+    for _idx in $(python3 -c "
+import yaml
+with open('bz.yaml') as f:
+    d = yaml.safe_load(f)
+for i, a in enumerate(d.get('agents', [])):
+    print(a.get('runtime', 'claude'))
+" < /dev/null 2>/dev/null); do
+        required_runtimes+=("$_idx")
+    done
+
+    for rt in "${required_runtimes[@]}"; do
+        [[ -n "${checked_runtimes[$rt]:-}" ]] && continue
+        checked_runtimes[$rt]=1
+
+        local cli_name
+        case "$rt" in
+            claude|claude-code) cli_name="claude" ;;
+            codex) cli_name="codex" ;;
+            *) cli_name="$rt" ;;
+        esac
+
+        if ! command -v "$cli_name" >/dev/null 2>&1; then
+            err "${cli_name} is not installed. Install it first:"
+            case "$cli_name" in
+                claude) echo "  npm install -g @anthropic-ai/claude-code" ;;
+                codex)  echo "  npm install -g @openai/codex" ;;
+                *)      echo "  Install ${cli_name} and ensure it's in PATH" ;;
+            esac
+            exit 1
+        fi
+
+        # Quick auth check
+        local auth_ok=0
+        case "$cli_name" in
+            claude)
+                if claude --version >/dev/null 2>&1; then auth_ok=1; fi
+                ;;
+            codex)
+                if codex --version >/dev/null 2>&1; then auth_ok=1; fi
+                ;;
+            *)
+                auth_ok=1  # assume ok for unknown CLIs
+                ;;
+        esac
+
+        if [[ "$auth_ok" -eq 0 ]]; then
+            err "${cli_name} is installed but may not be authenticated."
+            echo "  Run: ${cli_name} (interactive) to authenticate first."
+            exit 1
+        fi
+
+        ok "${cli_name} ready"
+    done
+
     # Initialize git if needed
     if [[ ! -d ".git" ]]; then
         git init -q
