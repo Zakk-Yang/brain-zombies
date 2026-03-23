@@ -389,22 +389,35 @@ CONTEXT MANAGEMENT — keep your memory lean:
 
 START NOW."
 
+        # Write prompt to file to avoid shell escaping issues
+        local prompt_file="${agent_dir}/PROMPT.txt"
+        echo "$prompt" > "$prompt_file"
+        # Also copy to worktree if using worktrees
+        if [[ "$git_strategy" == "worktree" ]]; then
+            cp "$prompt_file" "${work_dir}/${BZ_DIR}/agents/${agent_id}/PROMPT.txt" 2>/dev/null || true
+        fi
+
         # Spawn tmux session
         local sess
         sess="$(session_name "$agent_id")"
         tmux kill-session -t "$sess" 2>/dev/null || true
 
+        local abs_work_dir
+        abs_work_dir="$(realpath "$work_dir")"
+        local abs_prompt_file="${abs_work_dir}/${BZ_DIR}/agents/${agent_id}/PROMPT.txt"
+        [[ ! -f "$abs_prompt_file" ]] && abs_prompt_file="$(realpath "$prompt_file")"
+
         local cmd
         if [[ "$cli_cmd" == "claude" ]]; then
-            cmd="cd $(realpath "$work_dir") && claude --dangerously-skip-permissions"
+            cmd="cd ${abs_work_dir} && claude --dangerously-skip-permissions"
             [[ -n "$model" ]] && cmd="$cmd --model $model"
-            cmd="$cmd -p '${prompt}'"
+            cmd="$cmd -p \"\$(cat ${abs_prompt_file})\""
         elif [[ "$cli_cmd" == "codex" ]]; then
-            cmd="cd $(realpath "$work_dir") && codex"
+            cmd="cd ${abs_work_dir} && codex"
             [[ -n "$model" ]] && cmd="$cmd --model $model"
-            cmd="$cmd --full-auto -q '${prompt}'"
+            cmd="$cmd --full-auto -q \"\$(cat ${abs_prompt_file})\""
         else
-            cmd="cd $(realpath "$work_dir") && ${cli_cmd} '${prompt}'"
+            cmd="cd ${abs_work_dir} && ${cli_cmd} \"\$(cat ${abs_prompt_file})\""
         fi
 
         tmux new-session -d -s "$sess" -x 200 -y 50
