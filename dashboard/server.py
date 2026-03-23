@@ -36,6 +36,31 @@ PRICING = {
 }
 
 
+# Model context window sizes
+CONTEXT_WINDOWS = {
+    "haiku": 200_000,
+    "sonnet": 200_000,
+    "opus": 200_000,
+    "gpt-4.1-nano": 1_047_576,
+    "gpt-4.1-mini": 1_047_576,
+    "gpt-4.1": 1_047_576,
+    "gpt-4o": 128_000,
+    "gpt-4o-mini": 128_000,
+    "gpt-5-nano": 1_047_576,
+    "gpt-5-mini": 1_047_576,
+    "gpt-5": 1_047_576,
+    "gpt-5.4": 1_047_576,
+    "gpt-5.3-codex-spark": 192_000,
+    "gpt-5.3-codex": 192_000,
+    "gpt-5.2-codex": 192_000,
+    "gpt-5.1-codex": 192_000,
+    "gpt-5.1-codex-mini": 192_000,
+    "gpt-5.1-codex-max": 512_000,
+    "o3": 200_000,
+    "o4-mini": 200_000,
+}
+
+
 def read_yaml():
     """Read bz.yaml config."""
     try:
@@ -339,7 +364,7 @@ def build_dashboard_data():
         usage = get_token_usage(aid)
         cost = estimate_cost_from_usage(usage, model)
         commits = get_commits(aid)
-        context_max = 200000
+        context_max = CONTEXT_WINDOWS.get(model, 200_000)
         context_pct = round(usage["total"] / context_max * 100, 1) if context_max else 0
 
         total_tokens += usage["total"]
