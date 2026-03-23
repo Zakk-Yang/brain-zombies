@@ -147,7 +147,13 @@ function render(data) {
           <span class="label">Commits:</span> ${z.commit_count} <span class="label">Files:</span> ${z.files}
         </div>
         <div class="ctx-bar"><div class="ctx-fill ${ctxClass(z.context_pct)}" style="width:${Math.min(z.context_pct, 100)}%"></div></div>
-        <div class="zombie-meta"><span class="label">Context:</span> ${(z.context_tokens/1000).toFixed(1)}k (${z.context_pct}%) · <span class="label">Cost:</span> $${z.estimated_cost.toFixed(3)}</div>
+        <div class="zombie-meta">
+          <span class="label">In:</span> ${(z.input_tokens/1000).toFixed(1)}k
+          <span class="label">Out:</span> ${(z.output_tokens/1000).toFixed(1)}k
+          ${z.cache_read ? `<span class="label">Cache:</span> ${(z.cache_read/1000).toFixed(1)}k` : ''}
+          <span class="label">Total:</span> ${(z.total_tokens/1000).toFixed(1)}k (${z.context_pct}%)
+          · <span class="label">Cost:</span> $${z.estimated_cost.toFixed(3)}
+        </div>
         <div class="zombie-summary">${z.summary}</div>
         ${z.next_step ? `<div class="zombie-meta"><span class="label">Next:</span> ${z.next_step}</div>` : ''}
       </div>

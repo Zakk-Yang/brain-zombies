@@ -128,31 +128,95 @@ def get_health(agent_id, state):
     return "healthy"
 
 
-def estimate_context(agent_id):
-    """Estimate context size from tmux pane output."""
-    config = read_yaml()
-    project_name = config.get("project", {}).get("name", "unknown")
-    sess = f"bz-{project_name}-{agent_id}"
-    try:
-        result = subprocess.run(
-            ["tmux", "capture-pane", "-t", sess, "-p", "-S", "-"],
-            capture_output=True, text=True, timeout=5
-        )
-        chars = len(result.stdout)
-        tokens = chars // 4
-        return tokens
-    except Exception:
-        return 0
+def get_token_usage(agent_id):
+    """Get real token usage from CLI session files.
+
+    Returns dict with input_tokens, output_tokens, cache_read, cache_write, total, cost.
+    Falls back to tmux pane estimation if session files unavailable.
+    """
+    usage = {"input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_write": 0}
+
+    # Try Claude Code session JSONL (~/.claude/projects/<slug>/*.jsonl)
+    # Claude slugifies paths: /home/user/foo → -home-user-foo
+    wt = BZ_DIR / "worktrees" / agent_id
+    claude_dir = None
+
+    # Check worktree path first, then project root
+    for check_path in [wt, PROJECT_ROOT]:
+        if not check_path.exists():
+            continue
+        slug = str(check_path.resolve()).replace("/", "-").lstrip("-")
+        candidate = Path.home() / ".claude" / "projects" / slug
+        if candidate.exists():
+            claude_dir = candidate
+            break
+
+    if claude_dir is None:
+        # Fallback: search for matching project dirs
+        claude_projects = Path.home() / ".claude" / "projects"
+        if claude_projects.exists():
+            for d in claude_projects.iterdir():
+                if agent_id in d.name and "worktree" in d.name:
+                    claude_dir = d
+                    break
+    if claude_dir.exists():
+        for jsonl in sorted(claude_dir.glob("*.jsonl"), key=os.path.getmtime, reverse=True)[:1]:
+            try:
+                for line in jsonl.read_text().splitlines():
+                    if not line.strip():
+                        continue
+                    entry = json.loads(line)
+                    msg = entry.get("message", {})
+                    if isinstance(msg, dict) and "usage" in msg:
+                        u = msg["usage"]
+                        usage["input_tokens"] += u.get("input_tokens", 0)
+                        usage["output_tokens"] += u.get("output_tokens", 0)
+                        usage["cache_read"] += u.get("cache_read_input_tokens", 0)
+                        usage["cache_write"] += u.get("cache_creation_input_tokens", 0)
+            except Exception:
+                pass
+
+    # Try Codex: parse "tokens used\nN" from tmux output
+    if usage["input_tokens"] == 0 and usage["output_tokens"] == 0:
+        config = read_yaml()
+        project_name = config.get("project", {}).get("name", "unknown")
+        sess = f"bz-{project_name}-{agent_id}"
+        try:
+            result = subprocess.run(
+                ["tmux", "capture-pane", "-t", sess, "-p", "-S", "-"],
+                capture_output=True, text=True, timeout=5
+            )
+            output = result.stdout
+            # Codex prints "tokens used\nN,NNN"
+            m = re.search(r'tokens used\s*\n\s*([\d,]+)', output)
+            if m:
+                total = int(m.group(1).replace(",", ""))
+                usage["input_tokens"] = int(total * 0.6)
+                usage["output_tokens"] = int(total * 0.4)
+            else:
+                # Fallback: rough estimate from pane size
+                chars = len(output)
+                est = chars // 4
+                usage["input_tokens"] = int(est * 0.6)
+                usage["output_tokens"] = int(est * 0.4)
+        except Exception:
+            pass
+
+    usage["total"] = usage["input_tokens"] + usage["output_tokens"]
+    return usage
 
 
-def estimate_cost(tokens, model):
-    """Estimate cost from token count and model."""
+def estimate_cost_from_usage(usage, model):
+    """Calculate cost from real token usage breakdown."""
     pricing = PRICING.get(model, {"input": 1.0, "output": 4.0})
-    # Rough split: 60% input, 40% output
-    input_tokens = tokens * 0.6
-    output_tokens = tokens * 0.4
-    cost = (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
-    return round(cost, 4)
+    input_cost = usage["input_tokens"] * pricing["input"] / 1_000_000
+    output_cost = usage["output_tokens"] * pricing["output"] / 1_000_000
+    # Cache reads are typically 90% cheaper
+    cache_cost = usage["cache_read"] * pricing["input"] * 0.1 / 1_000_000
+    # Cache writes are 25% more expensive
+    cache_write_cost = usage["cache_write"] * pricing["input"] * 1.25 / 1_000_000
+    total = input_cost + output_cost + cache_cost + cache_write_cost
+    return round(total, 4)
 
 
 def get_commits(agent_id):
@@ -272,11 +336,13 @@ def build_dashboard_data():
         state = status.get("state", "unknown")
         phase = get_phase(state)
         health = get_health(aid, state)
-        context = estimate_context(aid)
-        cost = estimate_cost(context, model)
+        usage = get_token_usage(aid)
+        cost = estimate_cost_from_usage(usage, model)
         commits = get_commits(aid)
+        context_max = 200000
+        context_pct = round(usage["total"] / context_max * 100, 1) if context_max else 0
 
-        total_tokens += context
+        total_tokens += usage["total"]
         total_cost += cost
 
         zombies.append({
@@ -290,10 +356,13 @@ def build_dashboard_data():
             "files": status.get("files touched", "none"),
             "next_step": status.get("next step", ""),
             "blocker": status.get("blocker", "none"),
-            "context_tokens": context,
-            "context_max": 200000,
-            "context_pct": round(context / 200000 * 100, 1),
-            "tokens_used": context,
+            "input_tokens": usage["input_tokens"],
+            "output_tokens": usage["output_tokens"],
+            "cache_read": usage["cache_read"],
+            "cache_write": usage["cache_write"],
+            "total_tokens": usage["total"],
+            "context_max": context_max,
+            "context_pct": context_pct,
             "estimated_cost": cost,
             "commit_count": len(commits),
             "commits": commits[:5],
@@ -301,8 +370,9 @@ def build_dashboard_data():
         })
 
     # Brain stats
-    brain_tokens = estimate_context("supervisor") if (BZ_DIR / "agents" / "supervisor").exists() else 0
-    brain_cost = estimate_cost(brain_tokens, supervisor.get("model", ""))
+    brain_usage = get_token_usage("supervisor") if (BZ_DIR / "agents" / "supervisor").exists() else {"input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_write": 0, "total": 0}
+    brain_tokens = brain_usage["total"]
+    brain_cost = estimate_cost_from_usage(brain_usage, supervisor.get("model", ""))
 
     # All done?
     all_done = all(z["phase"] == "done" for z in zombies) if zombies else False
