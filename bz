@@ -413,7 +413,7 @@ START NOW."
             [[ -n "$model" ]] && cmd="$cmd --model $model"
             cmd="$cmd -p \"\$(cat ${abs_prompt_file})\""
         elif [[ "$cli_cmd" == "codex" ]]; then
-            cmd="cd ${abs_work_dir} && codex exec"
+            cmd="cd ${abs_work_dir} && codex exec --full-auto"
             [[ -n "$model" ]] && cmd="$cmd --model $model"
             cmd="$cmd \"\$(cat ${abs_prompt_file})\""
         else
