@@ -228,19 +228,20 @@ cmd_launch() {
     git_strategy="$(read_yaml 'git.strategy')"
 
     # Spawn each agent
-    local agents
-    agents="$(read_yaml_list)"
+    local -a agent_ids=()
+    while IFS= read -r _aid; do
+        [[ -n "$_aid" ]] && agent_ids+=("$_aid")
+    done <<< "$(read_yaml_list)"
     local agent_index=0
 
-    while IFS= read -r agent_id; do
-        [[ -z "$agent_id" ]] && continue
+    for agent_id in "${agent_ids[@]}"; do
 
         local runtime cli_cmd model task focus blocked_until
-        runtime="$(read_yaml "agents.${agent_index}.runtime")"
-        model="$(read_yaml "agents.${agent_index}.model")"
-        task="$(read_yaml "agents.${agent_index}.task")"
-        focus="$(read_yaml "agents.${agent_index}.focus")"
-        blocked_until="$(read_yaml "agents.${agent_index}.blocked_until")"
+        runtime="$(read_yaml "agents.${agent_index}.runtime" < /dev/null)"
+        model="$(read_yaml "agents.${agent_index}.model" < /dev/null)"
+        task="$(read_yaml "agents.${agent_index}.task" < /dev/null)"
+        focus="$(read_yaml "agents.${agent_index}.focus" < /dev/null)"
+        blocked_until="$(read_yaml "agents.${agent_index}.blocked_until" < /dev/null)"
 
         case "$runtime" in
             claude|claude-code) cli_cmd="claude" ;;
