@@ -26,6 +26,7 @@ Usage: bz <command> [options]
 
 Commands:
   new              Create a new project from a brief
+  auth             Check & setup CLI authentication
   launch           Spawn all agents and supervisor
   status           Show agent states
   feedback         Send human feedback to a zombie
@@ -266,9 +267,18 @@ for i, a in enumerate(d.get('agents', [])):
         esac
 
         if [[ "$auth_ok" -eq 0 ]]; then
-            err "${cli_name} is installed but may not be authenticated."
-            echo "  Run: ${cli_name} (interactive) to authenticate first."
-            exit 1
+            warn "${cli_name} is installed but may not be authenticated."
+            printf "  Authenticate now? [Y/n]: "
+            read -r auth_answer
+            if [[ ! "$auth_answer" =~ ^[Nn] ]]; then
+                info "Launching ${cli_name} for authentication..."
+                echo "  (Complete the login, then exit with Ctrl-C or type /exit)"
+                $cli_name
+                ok "${cli_name} authentication complete"
+            else
+                err "Cannot launch without authentication."
+                exit 1
+            fi
         fi
 
         ok "${cli_name} ready"
@@ -713,6 +723,81 @@ Read your previous work in the worktree, apply the fix, commit with [${target}] 
     echo ""
 }
 
+# ── AUTH ─────────────────────────────────────────
+
+cmd_auth() {
+    echo ""
+    echo "  ${BOLD}🔑 bz — Authentication${NC}"
+    echo ""
+
+    local runtimes=("claude" "codex")
+
+    for rt in "${runtimes[@]}"; do
+        local cli_name="$rt"
+        local status_icon status_text
+
+        if ! command -v "$cli_name" >/dev/null 2>&1; then
+            status_icon="${RED}✗${NC}"
+            status_text="not installed"
+            printf "  ${status_icon} ${BOLD}%-10s${NC} ${status_text}\n" "$cli_name"
+
+            case "$cli_name" in
+                claude) echo "    Install: npm install -g @anthropic-ai/claude-code" ;;
+                codex)  echo "    Install: npm install -g @openai/codex" ;;
+            esac
+            continue
+        fi
+
+        # Check if authenticated by trying a quick operation
+        local authenticated=0
+        case "$cli_name" in
+            claude)
+                if claude --version >/dev/null 2>&1; then
+                    # Claude stores auth in ~/.claude/
+                    if [[ -d "$HOME/.claude" ]]; then
+                        authenticated=1
+                    fi
+                fi
+                ;;
+            codex)
+                if codex --version >/dev/null 2>&1; then
+                    # Codex stores auth in ~/.codex/
+                    if [[ -d "$HOME/.codex" ]] && ls "$HOME/.codex/auth"* >/dev/null 2>&1; then
+                        authenticated=1
+                    else
+                        # Check if openai key exists in environment
+                        [[ -n "${OPENAI_API_KEY:-}" ]] && authenticated=1
+                    fi
+                fi
+                ;;
+        esac
+
+        if [[ "$authenticated" -eq 1 ]]; then
+            status_icon="${GREEN}✓${NC}"
+            status_text="authenticated"
+            printf "  ${status_icon} ${BOLD}%-10s${NC} ${status_text}\n" "$cli_name"
+        else
+            status_icon="${YELLOW}!${NC}"
+            status_text="installed but not authenticated"
+            printf "  ${status_icon} ${BOLD}%-10s${NC} ${status_text}\n" "$cli_name"
+
+            printf "    Authenticate now? [Y/n]: "
+            read -r answer
+            if [[ ! "$answer" =~ ^[Nn] ]]; then
+                echo ""
+                info "Launching ${cli_name} for authentication..."
+                echo "    (Complete the login, then exit with Ctrl-C or type /exit)"
+                echo ""
+                $cli_name
+                echo ""
+                ok "${cli_name} authentication complete"
+            fi
+        fi
+    done
+
+    echo ""
+}
+
 # Helper: read a field for a specific agent by id
 read_yaml_agent_field() {
     local target_id="$1"
@@ -732,6 +817,7 @@ for a in data.get('agents', []):
 
 case "${1:-}" in
     new)       shift; cmd_new "$@" ;;
+    auth)      shift; cmd_auth "$@" ;;
     launch)    shift; cmd_launch "$@" ;;
     status)    shift; cmd_status "$@" ;;
     attach)    shift; cmd_attach "$@" ;;
