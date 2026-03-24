@@ -305,12 +305,13 @@ for i, a in enumerate(d.get('agents', [])):
 
     for agent_id in "${agent_ids[@]}"; do
 
-        local runtime cli_cmd model task focus blocked_until
+        local runtime cli_cmd model task focus blocked_until thinking
         runtime="$(read_yaml "agents.${agent_index}.runtime" < /dev/null)"
         model="$(read_yaml "agents.${agent_index}.model" < /dev/null)"
         task="$(read_yaml "agents.${agent_index}.task" < /dev/null)"
         focus="$(read_yaml "agents.${agent_index}.focus" < /dev/null)"
         blocked_until="$(read_yaml "agents.${agent_index}.blocked_until" < /dev/null)"
+        thinking="$(read_yaml "agents.${agent_index}.thinking" < /dev/null)"
 
         case "$runtime" in
             claude|claude-code) cli_cmd="claude" ;;
@@ -415,6 +416,7 @@ START NOW."
         if [[ "$cli_cmd" == "claude" ]]; then
             cmd="cd ${abs_work_dir} && claude --dangerously-skip-permissions"
             [[ -n "$model" ]] && cmd="$cmd --model $model"
+            [[ -n "$thinking" && "$thinking" != "None" ]] && cmd="$cmd --thinking $thinking"
             cmd="$cmd -p \"\$(cat ${abs_prompt_file})\""
         elif [[ "$cli_cmd" == "codex" ]]; then
             cmd="cd ${abs_work_dir} && codex exec --full-auto"

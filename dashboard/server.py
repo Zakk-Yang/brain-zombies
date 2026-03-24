@@ -376,18 +376,19 @@ def resolve_model_display(runtime, model):
     return full
 
 
-# Models that support extended thinking
-THINKING_MODELS = {
-    "opus", "claude-opus-4-6", "claude-opus-4-5",
-    "sonnet", "claude-sonnet-4-6", "claude-sonnet-4-5",
-    "o3", "o4-mini", "o3-mini",
-    "gpt-5.3-codex-spark", "gpt-5.3-codex",
-}
-
-def get_thinking_mode(model):
-    """Return thinking mode label for a model."""
-    if model in THINKING_MODELS or any(model.startswith(p) for p in ["claude-opus", "claude-sonnet", "o3", "o4"]):
-        return "thinking"
+def get_thinking_mode_from_config(agent_id):
+    """Read thinking level from bz.yaml for an agent."""
+    try:
+        config = read_yaml()
+        # Check supervisor
+        if agent_id == "supervisor":
+            return config.get("supervisor", {}).get("thinking", None)
+        # Check agents
+        for a in config.get("agents", []):
+            if a.get("id") == agent_id:
+                return a.get("thinking", None)
+    except Exception:
+        pass
     return None
 
 
@@ -554,7 +555,7 @@ def build_dashboard_data():
         total_cost += cost
 
         model_display = resolve_model_display(runtime, model)
-        thinking_mode = get_thinking_mode(model)
+        thinking_mode = get_thinking_mode_from_config(aid)
         last_updated = get_last_updated(status)
         file_list = status.get("files touched", "none")
         file_count = len([f for f in file_list.split(",") if f.strip() and f.strip() != "none"]) if file_list != "none" else 0
@@ -610,7 +611,7 @@ def build_dashboard_data():
             pass
     elapsed = int(end_time - start_time) if start_time else 0
 
-    supervisor_thinking = get_thinking_mode(supervisor.get("model", ""))
+    supervisor_thinking = get_thinking_mode_from_config("supervisor")
     supervisor_model_display = resolve_model_display(
         supervisor.get("runtime", ""), supervisor.get("model", ""))
 
