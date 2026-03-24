@@ -535,7 +535,7 @@ def build_dashboard_data():
         context_max = get_context_window(model)
         context_pct = round(usage["total"] / context_max * 100, 1) if context_max else 0
 
-        total_tokens += usage["total"]
+        total_tokens += usage.get("total_billed", usage["total"])
         total_cost += cost
 
         model_display = resolve_model_display(runtime, model)
