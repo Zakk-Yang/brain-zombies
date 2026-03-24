@@ -162,8 +162,13 @@ def read_status(agent_id):
     return fields
 
 
-def get_phase(state):
-    """Map state to standardized phase."""
+def get_phase(state, agent_id=None):
+    """Map state to standardized phase.
+
+    Lifecycle: starting → planning → blocked → coding → ready-for-review → done
+    - ready-for-review: zombie says done, brain hasn't confirmed
+    - done: brain confirmed via DECISION.md
+    """
     mapping = {
         "starting": "starting",
         "planning": "planning",
@@ -171,10 +176,22 @@ def get_phase(state):
         "working": "coding",
         "coding": "coding",
         "testing": "testing",
-        "review": "review",
-        "ready-for-review": "review",
-        "done": "done",
+        "review": "ready-for-review",
+        "ready-for-review": "ready-for-review",
     }
+
+    if state == "done" and agent_id:
+        # Check if brain confirmed via DECISION.md
+        decision_file = BZ_DIR / "agents" / agent_id / "DECISION.md"
+        if decision_file.exists():
+            content = decision_file.read_text().lower()
+            if any(w in content for w in ["accept", "complete", "proceed", "unblock", "done"]):
+                return "done"
+        # No brain confirmation — zombie self-reported done
+        return "ready-for-review"
+    elif state == "done":
+        return "done"
+
     return mapping.get(state, state or "unknown")
 
 
@@ -390,12 +407,16 @@ def get_message_log():
                         "type": "decision",
                     })
                 elif "RESPONSE" in msg:
+                    # Parse target from "DECISION: <target> —"
+                    resp_text = msg.replace("RESPONSE: ", "")
+                    target_m = re.search(r'DECISION:\s*(\S+)', resp_text)
+                    target = target_m.group(1).rstrip(" —*") if target_m else ""
                     messages.append({
                         "time": ts,
                         "from": "🧠 brain",
-                        "to": "",
-                        "message": msg.replace("RESPONSE: ", "")[:100],
-                        "type": "brain",
+                        "to": f"🧟 {target}" if target else "",
+                        "message": resp_text[:100],
+                        "type": "decision",
                     })
                 elif "State change" in msg:
                     agents = msg.split(":")[-1].strip()
@@ -494,7 +515,7 @@ def build_dashboard_data():
         runtime = ac.get("runtime", "")
         status = read_status(aid)
         state = status.get("state", "unknown")
-        phase = get_phase(state)
+        phase = get_phase(state, aid)
         health = get_health(aid, state)
         usage = get_token_usage(aid)
         cost = estimate_cost_from_usage(usage, model)
