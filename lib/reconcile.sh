@@ -176,28 +176,113 @@ wake_brain() {
     local reason="$1"
     local mode="$2"   # reactive | proactive | crash | stall
 
-    local sess="bz-${PROJECT_NAME}-supervisor"
-    if ! tmux has-session -t "$sess" 2>/dev/null; then
-        echo "[nerve] WARNING: brain session not running!"
-        return 1
-    fi
+    # Build context: all zombie statuses
+    local status_summary=""
+    for sf in "${BZ_DIR}/agents"/*/STATUS.md; do
+        [[ -f "$sf" ]] || continue
+        local aid
+        aid="$(basename "$(dirname "$sf")")"
+        [[ "$aid" == "supervisor" ]] && continue
+        local state summary blocker
+        state="$(grep '^State:' "$sf" 2>/dev/null | head -1 | sed 's/State: //')"
+        summary="$(grep '^Summary:' "$sf" 2>/dev/null | head -1 | sed 's/Summary: //')"
+        blocker="$(grep '^Blocker:' "$sf" 2>/dev/null | head -1 | sed 's/Blocker: //')"
+        status_summary="${status_summary}
+- ${aid}: state=${state} | ${summary} | blocker=${blocker}"
+    done
 
-    local message
+    local prompt
     case "$mode" in
         reactive)
-            message="NERVE SIGNAL: Zombie state change —${reason}. Read all .bz/agents/*/STATUS.md and coordinate." ;;
+            prompt="NERVE SIGNAL: Zombie state change detected —${reason}.
+
+Current zombie states:${status_summary}
+
+YOUR JOB: Read the states above. If any zombie just finished (state=done) and another is blocked waiting for it, write a DECISION file to unblock it. If any zombie is stuck, write a redirect. Write your decisions to .bz/agents/<zombie-id>/DECISION.md with clear instructions.
+
+For each decision, output a line: DECISION: <zombie-id> — <action> — <reason>" ;;
         crash)
-            message="ZOMBIE DOWN:${reason} — tmux session died. Check if task was complete, restart if needed, or reassign." ;;
+            prompt="ZOMBIE DOWN:${reason} — tmux session died.
+
+Current zombie states:${status_summary}
+
+YOUR JOB: Assess if the crashed zombie's work was committed. Write a DECISION file for it (restart or reassign). Output: DECISION: <zombie-id> — <action> — <reason>" ;;
         stall)
-            message="STALL DETECTED:${reason} — no commits for 10+ min while State=working. Investigate: read STATUS.md, check worktree, redirect if stuck." ;;
+            prompt="STALL DETECTED:${reason} — no commits for 10+ minutes while State=working.
+
+Current zombie states:${status_summary}
+
+YOUR JOB: Investigate why the zombie stalled. Write a DECISION file with specific instructions to get it moving. Output: DECISION: <zombie-id> — <action> — <reason>" ;;
         proactive)
-            message="HEARTBEAT: Routine check. Verify all zombies making progress. Read .bz/agents/*/STATUS.md. Send decisions where needed." ;;
+            prompt="HEARTBEAT CHECK: Routine progress check.
+
+Current zombie states:${status_summary}
+
+YOUR JOB: Verify all zombies are making progress. If any need intervention, write DECISION files. If all are fine, just output: ALL CLEAR. Output: DECISION: <zombie-id> — <action> — <reason>" ;;
     esac
 
-    tmux send-keys -t "$sess" "$message" Enter
-    echo "[nerve] $(date '+%H:%M:%S') WAKE brain (${mode}):${reason}"
+    # Read brain config
+    local brain_runtime brain_model brain_cli
+    brain_runtime="$(python3 -c "
+import yaml
+with open('${PROJECT_ROOT}/bz.yaml') as f:
+    d = yaml.safe_load(f)
+print(d.get('supervisor',{}).get('runtime','claude'))
+" 2>/dev/null || echo "claude")"
+    brain_model="$(python3 -c "
+import yaml
+with open('${PROJECT_ROOT}/bz.yaml') as f:
+    d = yaml.safe_load(f)
+print(d.get('supervisor',{}).get('model','sonnet'))
+" 2>/dev/null || echo "sonnet")"
 
-    # Reset proactive timer after any wake
+    case "$brain_runtime" in
+        claude|claude-code) brain_cli="claude" ;;
+        codex) brain_cli="codex" ;;
+        *) brain_cli="$brain_runtime" ;;
+    esac
+
+    echo "[brain] $(date '+%H:%M:%S') WAKE (${mode}):${reason}"
+
+    # On-demand brain call — captured output
+    local brain_output=""
+    local brain_prompt_file="${BZ_DIR}/logs/brain-prompt-$(date +%s).txt"
+    echo "$prompt" > "$brain_prompt_file"
+
+    if [[ "$brain_cli" == "claude" ]]; then
+        brain_output="$(cd "${PROJECT_ROOT}" && claude --dangerously-skip-permissions --model "$brain_model" -p "$(cat "$brain_prompt_file")" 2>/dev/null || echo "BRAIN ERROR")"
+    elif [[ "$brain_cli" == "codex" ]]; then
+        brain_output="$(cd "${PROJECT_ROOT}" && codex exec --full-auto --model "$brain_model" "$(cat "$brain_prompt_file")" 2>/dev/null || echo "BRAIN ERROR")"
+    fi
+
+    # Log brain output
+    echo "[brain] $(date '+%H:%M:%S') RESPONSE: ${brain_output}" | head -20
+
+    # Parse decisions and relay to zombies
+    echo "$brain_output" | grep "^DECISION:" | while IFS= read -r decision_line; do
+        local target action
+        target="$(echo "$decision_line" | sed 's/DECISION: //' | cut -d'—' -f1 | xargs)"
+        action="$(echo "$decision_line" | cut -d'—' -f2- | xargs)"
+
+        if [[ -n "$target" && -n "$action" ]]; then
+            # Write decision file
+            local decision_file="${BZ_DIR}/agents/${target}/DECISION.md"
+            echo "# Brain Decision ($(date '+%H:%M:%S'))
+${action}" > "$decision_file"
+
+            # Send to zombie tmux
+            local zombie_sess="bz-${PROJECT_NAME}-${target}"
+            if tmux has-session -t "$zombie_sess" 2>/dev/null; then
+                tmux send-keys -t "$zombie_sess" "BRAIN DECISION: ${action}" Enter
+            fi
+
+            echo "[brain] $(date '+%H:%M:%S') → 🧟 ${target}: ${action}"
+        fi
+    done
+
+    rm -f "$brain_prompt_file"
+
+    # Reset proactive timer
     date +%s > "$LAST_PROACTIVE_FILE"
 }
 

@@ -367,8 +367,7 @@ def get_message_log():
                 ts = m.group(2)
                 msg = m.group(3)
 
-                if "WAKE brain" in msg:
-                    # Extract mode and reason
+                if "WAKE" in msg and "brain" in source:
                     mode_m = re.search(r'\((\w+)\)', msg)
                     mode = mode_m.group(1) if mode_m else "signal"
                     messages.append({
@@ -377,6 +376,26 @@ def get_message_log():
                         "to": "🧠 brain",
                         "message": f"{mode}: {msg.split(':',1)[-1].strip()}",
                         "type": "signal",
+                    })
+                elif "→ 🧟" in msg:
+                    # Brain decision to zombie
+                    target_m = re.search(r'→ 🧟 (\S+):', msg)
+                    target = target_m.group(1) if target_m else "?"
+                    decision = msg.split(":", 1)[-1].strip() if ":" in msg else msg
+                    messages.append({
+                        "time": ts,
+                        "from": "🧠 brain",
+                        "to": f"🧟 {target}",
+                        "message": decision,
+                        "type": "decision",
+                    })
+                elif "RESPONSE" in msg:
+                    messages.append({
+                        "time": ts,
+                        "from": "🧠 brain",
+                        "to": "",
+                        "message": msg.replace("RESPONSE: ", "")[:100],
+                        "type": "brain",
                     })
                 elif "State change" in msg:
                     agents = msg.split(":")[-1].strip()

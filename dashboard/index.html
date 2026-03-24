@@ -84,6 +84,8 @@ main { max-width: 1200px; margin: 0 auto; padding: 1rem; }
 .log-msg { color: #c8d0da; }
 .log-msg.commit { color: #22c55e; }
 .log-msg.feedback { color: #f59e0b; }
+.log-msg.decision { color: #a78bfa; font-weight: 600; }
+.log-msg.brain { color: #a78bfa; }
 </style>
 </head>
 <body>
@@ -110,7 +112,7 @@ function sourceClass(s) {
 
 function render(data) {
   document.getElementById('project-name').textContent = `— ${data.project.name}`;
-  document.getElementById('updated').textContent = `Updated ${data.updated_at}`;
+  document.getElementById('updated').textContent = `Last Update: ${data.updated_at}`;
 
   // Project bar (includes cost)
   document.getElementById('project-bar').innerHTML = `

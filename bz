@@ -428,69 +428,17 @@ START NOW."
         agent_index=$((agent_index + 1))
     done
 
-    # Spawn brain (supervisor) session
-    local sup_runtime sup_model sup_cli
-    sup_runtime="$(read_yaml 'supervisor.runtime' < /dev/null)"
-    sup_model="$(read_yaml 'supervisor.model' < /dev/null)"
-    case "$sup_runtime" in
-        claude|claude-code) sup_cli="claude" ;;
-        codex) sup_cli="codex" ;;
-        *) sup_cli="${sup_runtime:-claude}" ;;
-    esac
-
+    # Brain runs on-demand (spawned by reconcile loop when needed)
     local sup_dir="${BZ_DIR}/agents/supervisor"
     mkdir -p "$sup_dir"
-
-    cat > "${sup_dir}/BRIEF.md" << SUPEOF
-# Brain (Supervisor)
-
-You coordinate the zombies (coding agents). When woken by a nerve signal:
-
-1. Read .bz/agents/*/STATUS.md for all zombies
-2. If a zombie is done and another is blocked waiting for it, send CONTINUE
-3. If a zombie is stuck (working but no commits), investigate and redirect
-4. If all zombies are done, report project complete
-
-You communicate by updating .bz/agents/<id>/STATUS.md or sending messages.
-Keep responses brief — you're a coordinator, not a coder.
-SUPEOF
-
     cat > "${sup_dir}/STATUS.md" << SUPSTATEOF
 # STATUS.md
 State: monitoring
-Summary: Brain active, watching zombie states.
+Summary: Brain ready. Wakes on-demand when nerve detects state changes.
 Next step: Wait for nerve signals.
 Last updated: $(date '+%Y-%m-%d %H:%M')
 SUPSTATEOF
-
-    local sup_sess
-    sup_sess="$(session_name "supervisor")"
-    tmux kill-session -t "$sup_sess" 2>/dev/null || true
-
-    local sup_prompt="You are the brain — a supervisor coordinating coding agents (zombies). Stay idle until you receive a NERVE SIGNAL or HEARTBEAT CHECK. When woken, read all .bz/agents/*/STATUS.md files and coordinate: unblock waiting zombies, redirect stuck ones, report completion. Keep responses brief."
-
-    local sup_prompt_file="${sup_dir}/PROMPT.txt"
-    echo "$sup_prompt" > "$sup_prompt_file"
-
-    local sup_abs_dir
-    sup_abs_dir="$(realpath ".")"
-
-    local sup_cmd
-    if [[ "$sup_cli" == "claude" ]]; then
-        sup_cmd="cd ${sup_abs_dir} && claude --dangerously-skip-permissions"
-        [[ -n "$sup_model" ]] && sup_cmd="$sup_cmd --model $sup_model"
-        sup_cmd="$sup_cmd"
-    elif [[ "$sup_cli" == "codex" ]]; then
-        sup_cmd="cd ${sup_abs_dir} && codex exec --full-auto"
-        [[ -n "$sup_model" ]] && sup_cmd="$sup_cmd --model $sup_model"
-        sup_cmd="$sup_cmd"
-    else
-        sup_cmd="cd ${sup_abs_dir} && $sup_cli"
-    fi
-
-    tmux new-session -d -s "$sup_sess" -x 200 -y 50
-    tmux send-keys -t "$sup_sess" "$sup_cmd" Enter
-    ok "Spawned brain (${sup_cli}/${sup_model}) → tmux: ${sup_sess}"
+    ok "Brain ready (on-demand, wakes on state changes)"
 
     # Start reconcile loop
     local reconcile_pid_file="${BZ_DIR}/reconcile.pid"
