@@ -303,9 +303,14 @@ print(d.get('supervisor',{}).get('thinking',''))
     local brain_prompt_file="${BZ_DIR}/logs/brain-prompt-$(date +%s).txt"
     echo "$prompt" > "$brain_prompt_file"
 
+    # Claude Code CLI accepts: enabled, adaptive, disabled (not high/medium/xhigh)
     local thinking_flag=""
-    if [[ -n "$brain_thinking" && "$brain_thinking" != "None" && "$brain_thinking" != "" ]]; then
-        thinking_flag="--thinking $brain_thinking"
+    if [[ -n "$brain_thinking" && "$brain_thinking" != "None" && "$brain_thinking" != "" && "$brain_thinking" != "off" ]]; then
+        if [[ "$brain_thinking" == "disabled" || "$brain_thinking" == "off" ]]; then
+            thinking_flag="--thinking disabled"
+        else
+            thinking_flag="--thinking enabled"
+        fi
     fi
 
     if [[ "$brain_cli" == "claude" ]]; then

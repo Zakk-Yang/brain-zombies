@@ -417,7 +417,14 @@ START NOW."
         if [[ "$cli_cmd" == "claude" ]]; then
             cmd="cd ${abs_work_dir} && claude --dangerously-skip-permissions"
             [[ -n "$model" ]] && cmd="$cmd --model $model"
-            [[ -n "$thinking" && "$thinking" != "None" ]] && cmd="$cmd --thinking $thinking"
+            # Claude Code CLI accepts: enabled, adaptive, disabled (not high/medium/xhigh)
+            if [[ -n "$thinking" && "$thinking" != "None" && "$thinking" != "off" ]]; then
+                if [[ "$thinking" == "disabled" || "$thinking" == "off" ]]; then
+                    cmd="$cmd --thinking disabled"
+                else
+                    cmd="$cmd --thinking enabled"
+                fi
+            fi
             cmd="$cmd -p \"\$(cat ${abs_prompt_file})\""
         elif [[ "$cli_cmd" == "codex" ]]; then
             cmd="cd ${abs_work_dir} && codex exec --full-auto"
