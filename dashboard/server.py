@@ -246,7 +246,16 @@ def get_health(agent_id, state):
                 capture_output=True, text=True, timeout=5
             ).stdout.strip()
             # If last 5 lines are empty or just the launch command, model is thinking
-            meaningful_lines = [l for l in pane_output.split("\n") if l.strip() and not l.strip().startswith("cd ") and not l.strip().startswith("claude ") and not l.strip().startswith("codex ")]
+            meaningful_lines = [
+                l for l in pane_output.split("\n")
+                if l.strip()
+                and "$ cd " not in l
+                and "$ claude " not in l
+                and "$ codex " not in l
+                and not l.strip().startswith("cd ")
+                and not l.strip().startswith("claude ")
+                and not l.strip().startswith("codex ")
+            ]
             if len(meaningful_lines) == 0:
                 return "thinking"
         except Exception:
