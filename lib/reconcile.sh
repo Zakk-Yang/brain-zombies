@@ -270,10 +270,69 @@ print(d.get('supervisor',{}).get('model','sonnet'))
             echo "# Brain Decision ($(date '+%H:%M:%S'))
 ${action}" > "$decision_file"
 
-            # Send to zombie tmux
+            # Send to zombie — restart CLI if it exited
             local zombie_sess="bz-${PROJECT_NAME}-${target}"
+            local cli_alive=0
             if tmux has-session -t "$zombie_sess" 2>/dev/null; then
+                local pane_pid
+                pane_pid="$(tmux list-panes -t "$zombie_sess" -F '#{pane_pid}' 2>/dev/null | head -1)"
+                if [[ -n "$pane_pid" ]] && pgrep -P "$pane_pid" -f "claude|codex|aider" >/dev/null 2>&1; then
+                    cli_alive=1
+                fi
+            fi
+
+            if [[ "$cli_alive" -eq 1 ]]; then
                 tmux send-keys -t "$zombie_sess" "BRAIN DECISION: ${action}" Enter
+            else
+                # CLI exited — restart with decision as prompt
+                echo "[brain] $(date '+%H:%M:%S') Restarting ${target} CLI to deliver decision"
+                tmux kill-session -t "$zombie_sess" 2>/dev/null || true
+
+                local wt_path="${BZ_DIR}/worktrees/${target}"
+                local work_dir="${PROJECT_ROOT}"
+                [[ -d "$wt_path" ]] && work_dir="$wt_path"
+                local abs_work_dir
+                abs_work_dir="$(realpath "$work_dir")"
+
+                # Read zombie's runtime/model from config
+                local z_cli z_model
+                z_cli="$(python3 -c "
+import yaml
+with open('${PROJECT_ROOT}/bz.yaml') as f:
+    d = yaml.safe_load(f)
+for a in d.get('agents',[]):
+    if a.get('id') == '${target}':
+        r = a.get('runtime','claude')
+        print('claude' if r in ('claude','claude-code') else r)
+        break
+" 2>/dev/null || echo "claude")"
+                z_model="$(python3 -c "
+import yaml
+with open('${PROJECT_ROOT}/bz.yaml') as f:
+    d = yaml.safe_load(f)
+for a in d.get('agents',[]):
+    if a.get('id') == '${target}':
+        print(a.get('model','sonnet'))
+        break
+" 2>/dev/null || echo "sonnet")"
+
+                local restart_prompt="BRAIN DECISION: ${action}
+
+Read ${BZ_DIR}/agents/${target}/DECISION.md for full instructions. Execute NOW."
+                local restart_prompt_file="${BZ_DIR}/agents/${target}/RESTART_PROMPT.txt"
+                echo "$restart_prompt" > "$restart_prompt_file"
+
+                local restart_cmd
+                if [[ "$z_cli" == "claude" ]]; then
+                    restart_cmd="cd ${abs_work_dir} && claude --dangerously-skip-permissions --model ${z_model} -p \"\$(cat ${restart_prompt_file})\""
+                elif [[ "$z_cli" == "codex" ]]; then
+                    restart_cmd="cd ${abs_work_dir} && codex exec --full-auto --model ${z_model} \"\$(cat ${restart_prompt_file})\""
+                else
+                    restart_cmd="cd ${abs_work_dir} && ${z_cli} \"\$(cat ${restart_prompt_file})\""
+                fi
+
+                tmux new-session -d -s "$zombie_sess" -x 200 -y 50
+                tmux send-keys -t "$zombie_sess" "$restart_cmd" Enter
             fi
 
             echo "[brain] $(date '+%H:%M:%S') → 🧟 ${target}: ${action}"
