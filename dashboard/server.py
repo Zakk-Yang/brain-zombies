@@ -322,20 +322,32 @@ def get_token_usage(agent_id):
         except Exception:
             pass
 
+    # Billed tokens: input + output (cache is part of input billing)
+    # Display tokens: input + output (what model actually processed)
+    # Cache tokens shown separately for transparency
     usage["total"] = usage["input_tokens"] + usage["output_tokens"]
+    usage["total_billed"] = usage["input_tokens"] + usage["cache_write"] + usage["cache_read"] + usage["output_tokens"]
     return usage
 
 
 def estimate_cost_from_usage(usage, model):
-    """Calculate cost from real token usage breakdown."""
+    """Calculate cost from real token usage breakdown.
+
+    Anthropic billing: you pay for input + output tokens.
+    Cache tokens are part of input billing:
+      - cache_write: charged at input rate (written once)
+      - cache_read: charged at 10% of input rate (reuse discount)
+    In single-turn (-p) mode, cache writes happen but are never reused,
+    so the effective cost is: (input + cache_write) at input rate + output at output rate.
+    """
     pricing = PRICING.get(model, {"input": 1.0, "output": 4.0})
+    # Input tokens = direct input + cache writes (first-time cost)
+    # Cache reads replace input tokens at 10% rate
     input_cost = usage["input_tokens"] * pricing["input"] / 1_000_000
+    cache_write_cost = usage["cache_write"] * pricing["input"] / 1_000_000  # same as input rate
+    cache_read_cost = usage["cache_read"] * pricing["input"] * 0.1 / 1_000_000  # 90% discount
     output_cost = usage["output_tokens"] * pricing["output"] / 1_000_000
-    # Cache reads are typically 90% cheaper
-    cache_cost = usage["cache_read"] * pricing["input"] * 0.1 / 1_000_000
-    # Cache writes are 25% more expensive
-    cache_write_cost = usage["cache_write"] * pricing["input"] * 1.25 / 1_000_000
-    total = input_cost + output_cost + cache_cost + cache_write_cost
+    total = input_cost + cache_write_cost + cache_read_cost + output_cost
     return round(total, 4)
 
 
