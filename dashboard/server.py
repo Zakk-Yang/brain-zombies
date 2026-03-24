@@ -135,11 +135,11 @@ def _fetch_model_info():
 def get_context_window(model):
     """Get context window for a model, using API data when available."""
     info = _fetch_model_info()
-    # Try: exact name → resolved alias → split by /
+    # Try resolved alias FIRST (has API data), then short name (may have stale defaults)
     resolved = resolve_model_display("", model)
     entry = (
-        info.get(model)
-        or info.get(resolved)
+        info.get(resolved)
+        or info.get(model)
         or info.get(model.split("/")[-1] if "/" in model else model)
         or {}
     )
