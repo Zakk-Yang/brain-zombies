@@ -282,6 +282,13 @@ with open('${PROJECT_ROOT}/bz.yaml') as f:
     d = yaml.safe_load(f)
 print(d.get('supervisor',{}).get('model','sonnet'))
 " 2>/dev/null || echo "sonnet")"
+    local brain_thinking
+    brain_thinking="$(python3 -c "
+import yaml
+with open('${PROJECT_ROOT}/bz.yaml') as f:
+    d = yaml.safe_load(f)
+print(d.get('supervisor',{}).get('thinking',''))
+" 2>/dev/null || echo "")"
 
     case "$brain_runtime" in
         claude|claude-code) brain_cli="claude" ;;
@@ -296,8 +303,13 @@ print(d.get('supervisor',{}).get('model','sonnet'))
     local brain_prompt_file="${BZ_DIR}/logs/brain-prompt-$(date +%s).txt"
     echo "$prompt" > "$brain_prompt_file"
 
+    local thinking_flag=""
+    if [[ -n "$brain_thinking" && "$brain_thinking" != "None" && "$brain_thinking" != "" ]]; then
+        thinking_flag="--thinking $brain_thinking"
+    fi
+
     if [[ "$brain_cli" == "claude" ]]; then
-        brain_output="$(cd "${PROJECT_ROOT}" && claude --dangerously-skip-permissions --model "$brain_model" -p "$(cat "$brain_prompt_file")" 2>/dev/null || echo "BRAIN ERROR")"
+        brain_output="$(cd "${PROJECT_ROOT}" && claude --dangerously-skip-permissions --model "$brain_model" $thinking_flag -p "$(cat "$brain_prompt_file")" 2>/dev/null || echo "BRAIN ERROR")"
     elif [[ "$brain_cli" == "codex" ]]; then
         brain_output="$(cd "${PROJECT_ROOT}" && codex exec --full-auto --model "$brain_model" "$(cat "$brain_prompt_file")" 2>/dev/null || echo "BRAIN ERROR")"
     fi
