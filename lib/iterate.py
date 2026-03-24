@@ -162,6 +162,7 @@ class IterateLoop:
             self._log(f"{'='*60}")
 
             # 1 ── Brain plans
+            self._write_status("iterating", f"Iteration {iter_id}/{self.budget} — brain planning", "Waiting for brain")
             self._log("Brain planning...")
             plan = self._brain_plan(iter_id)
             if plan is None:
@@ -173,6 +174,7 @@ class IterateLoop:
             self._save_plan(iter_id, plan)
 
             # 2 ── Zombie implements
+            self._write_status("iterating", f"Iter {iter_id}: {plan.get('hypothesis', '?')[:60]}", "Zombie implementing")
             self._log("Zombie implementing...")
             ok = self._zombie_execute(plan, iter_id)
             if not ok:
@@ -227,12 +229,17 @@ class IterateLoop:
 
             self._record(iter_id, plan, metrics, "IMPROVED" if improved else "NO_IMPROVEMENT", dt, improved)
 
-            # 8 ── Goal check
+            # 8 ── Goal check + status update
             check_m = metrics if improved else champ
+            verdict_msg = f"Iter {iter_id}: {'KEPT' if improved else 'discarded'}"
+            self._write_status("iterating", verdict_msg, "Planning next iteration")
+
             if self._goal_met(check_m):
                 self._log("\n*** GOAL MET ***")
+                self._write_status("done", "Goal met!", "")
                 break
 
+        self._write_status("done", f"Completed {self.ledger.used}/{self.budget} iterations", "")
         self._print_summary()
 
     # ── Goal logic ───────────────────────────────────
@@ -467,6 +474,27 @@ START NOW."""
         if self._git_has_changes() and not self.ledger.path.exists():
             self._err("Working tree has uncommitted changes. Commit or stash first.")
             sys.exit(1)
+
+    # ── Status (dashboard + brain integration) ─────
+
+    def _write_status(self, state: str, summary: str, next_step: str = ""):
+        """Write STATUS.md for brain visibility + dashboard."""
+        status_dir = self.project_dir / ".bz" / "agents" / "iterator"
+        status_dir.mkdir(parents=True, exist_ok=True)
+        champ = self.ledger.champion
+        champ_str = self._fmt_metrics(champ.get("metrics", {}))
+        lines = [
+            "# STATUS.md",
+            f"State: {state}",
+            f"Summary: {summary}",
+            f"Champion: iter {champ.get('iteration', 0)} ({champ_str})",
+            f"Progress: {self.ledger.used}/{self.ledger.data['budget']['max']}",
+            f"Consecutive failures: {self.ledger.consecutive_failures()}",
+            f"Next step: {next_step}",
+            f"Blocker: none",
+            f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        ]
+        (status_dir / "STATUS.md").write_text("\n".join(lines))
 
     # ── Helpers ──────────────────────────────────────
 

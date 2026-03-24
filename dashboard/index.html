@@ -46,7 +46,25 @@ main { max-width: 1200px; margin: 0 auto; padding: 1rem; }
 .phase-review { background: #3d2e00; color: #eab308; }
 .phase-ready-for-review { background: #2e1a3d; color: #c084fc; }
 .phase-done { background: #0f2a0f; color: #22c55e; }
+.phase-iterating { background: #2e1a00; color: #f59e0b; }
 .phase-unknown { background: #1e1e1e; color: #666; }
+
+/* Iterator card */
+.zombie-card.iterator { border-left-color: #f59e0b; }
+.iterate-timeline { font-size: 0.75rem; margin-top: 0.5rem; max-height: 160px; overflow-y: auto; }
+.iterate-row { display: flex; gap: 0.5rem; padding: 2px 0; border-bottom: 1px solid #1a1a2e; }
+.iterate-row.kept { color: #4ade80; }
+.iterate-row.champion { color: #f59e0b; font-weight: 600; }
+.iterate-row.discarded { color: #556; }
+.iterate-row.running { color: #38bdf8; }
+.iterate-id { width: 35px; text-align: right; }
+.iterate-metric { width: 70px; text-align: right; }
+.iterate-verdict { width: 16px; text-align: center; }
+.iterate-hyp { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.iterate-progress { display: flex; align-items: center; gap: 0.8rem; margin: 0.5rem 0; }
+.iterate-bar { flex: 1; height: 6px; background: #1e2d3d; border-radius: 3px; overflow: hidden; }
+.iterate-bar-fill { height: 100%; background: #f59e0b; border-radius: 3px; transition: width 0.3s; }
+.iterate-champion { background: #1a1500; border: 1px solid #f59e0b33; border-radius: 6px; padding: 0.4rem 0.6rem; margin: 0.4rem 0; font-size: 0.8rem; }
 
 .health-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
 .health-healthy { background: #22c55e; }
@@ -124,6 +142,61 @@ async function teardownAll() {
     setTimeout(() => { btn.textContent = 'Kill All'; btn.disabled = false; }, 2000);
   }
 }
+function renderIteratorCard(z) {
+  const it = z.iterate;
+  const used = it.used || 0;
+  const budget = it.budget || 20;
+  const pct = Math.round(used / budget * 100);
+  const champIter = it.champion_iteration || 0;
+  const goalStr = Object.entries(it.goal || {}).map(([k,v]) => `${k} ${v}`).join(', ');
+
+  // Champion metrics
+  const champMetrics = it.champion_metrics || {};
+  const champStr = Object.entries(champMetrics)
+    .filter(([k,v]) => typeof v === 'number')
+    .map(([k,v]) => `${k}=${v.toFixed(4)}`)
+    .join(', ');
+
+  // Primary metric for timeline (first goal metric)
+  const primaryMetric = Object.keys(it.goal || {})[0] || 'ic';
+
+  // Timeline rows
+  let timelineHtml = '';
+  for (const row of (it.iterations || []).slice(-12)) {
+    const mark = row.kept ? (row.id === champIter ? '★' : '►') : '✗';
+    const cls = row.kept ? (row.id === champIter ? 'champion' : 'kept') : 'discarded';
+    const mVal = (row.metrics && row.metrics[primaryMetric]) != null
+      ? row.metrics[primaryMetric].toFixed(4) : '—';
+    const hyp = (row.hypothesis || '').substring(0, 50);
+    timelineHtml += `<div class="iterate-row ${cls}">
+      <span class="iterate-id">${row.id}</span>
+      <span class="iterate-verdict">${mark}</span>
+      <span class="iterate-metric">${mVal}</span>
+      <span class="iterate-hyp">${hyp}</span>
+    </div>`;
+  }
+
+  const stateLabel = it.state || z.phase || 'iterating';
+  return `
+    <div class="zombie-card iterator" style="grid-column: span 2;">
+      <div class="zombie-header">
+        <span class="zombie-name">🔄 ${z.id} <span style="font-weight:400;color:#f59e0b;font-size:0.8rem">(iterator)</span></span>
+        <span class="zombie-phase phase-iterating">${stateLabel} ${used}/${budget}</span>
+      </div>
+      <div class="zombie-meta">
+        <span class="label">Goal:</span> ${goalStr || '—'} ·
+        <span class="label">Brain:</span> ${z.model || 'opus'} ·
+        <span class="label">Zombie:</span> ${it.zombie_model || 'sonnet'}
+      </div>
+      <div class="iterate-progress">
+        <div class="iterate-bar"><div class="iterate-bar-fill" style="width:${pct}%"></div></div>
+        <span style="font-size:0.75rem;color:#f59e0b">${pct}%</span>
+      </div>
+      ${champStr ? `<div class="iterate-champion">★ Champion (iter ${champIter}): ${champStr}</div>` : ''}
+      <div class="iterate-timeline">${timelineHtml || '<div style="color:#556;font-size:0.75rem">No iterations yet</div>'}</div>
+    </div>
+  `;
+}
 function phaseClass(p) { return `phase-${p || 'unknown'}`; }
 function healthDot(h) { return `<span class="health-dot health-${h}"></span>${h}`; }
 function ctxClass(pct) { return pct > 70 ? 'high' : pct > 40 ? 'mid' : 'low'; }
@@ -170,29 +243,35 @@ function render(data) {
   // Zombies
   let html = '';
   for (const z of data.zombies) {
-    const cardClass = z.health === 'crashed' ? 'crashed' : z.health === 'stuck' ? 'stuck' : z.phase === 'blocked' ? 'blocked' : z.phase === 'done' ? 'done' : '';
-    html += `
-      <div class="zombie-card ${cardClass}">
-        <div class="zombie-header">
-          <span class="zombie-name">🧟 ${z.id}</span>
-          <span class="zombie-phase ${phaseClass(z.phase)}">${z.phase}</span>
+    if (z.iterate) {
+      // Iterator card — special rendering
+      html += renderIteratorCard(z);
+    } else {
+      // Regular zombie card
+      const cardClass = z.health === 'crashed' ? 'crashed' : z.health === 'stuck' ? 'stuck' : z.phase === 'blocked' ? 'blocked' : z.phase === 'done' ? 'done' : '';
+      html += `
+        <div class="zombie-card ${cardClass}">
+          <div class="zombie-header">
+            <span class="zombie-name">🧟 ${z.id}</span>
+            <span class="zombie-phase ${phaseClass(z.phase)}">${z.phase}</span>
+          </div>
+          <div class="zombie-meta">
+            <span class="label">Model:</span> ${z.model_display || z.model}${z.thinking_mode ? ` · <span style="color:#a78bfa">⚡${z.thinking_mode}</span>` : ''}<br>
+            <span class="label">Health:</span> ${healthDot(z.health)}
+            ${z.last_updated ? ` · <span class="label">Updated:</span> ${z.last_updated}` : ''}<br>
+            <span class="label">Commits:</span> ${z.commit_count} · <span class="label">Files:</span> ${z.file_count} (${z.files})
+          </div>
+          <div class="ctx-bar" title="${(z.total_tokens).toLocaleString()} / ${(z.context_max).toLocaleString()} tokens (${z.context_pct}%)"><div class="ctx-fill ${ctxClass(z.context_pct)}" style="width:${Math.min(z.context_pct, 100)}%"></div></div>
+          <div class="zombie-meta">
+            <span class="label">Tokens:</span> ${((z.input_tokens + (z.cache_write || 0) + (z.cache_read || 0) + z.output_tokens)/1000).toFixed(1)}k
+            (In: ${((z.input_tokens + (z.cache_write || 0) + (z.cache_read || 0))/1000).toFixed(1)}k Out: ${(z.output_tokens/1000).toFixed(1)}k)
+            · <span class="label">Cost:</span> $${z.estimated_cost.toFixed(2)}
+          </div>
+          <div class="zombie-summary">${z.summary}</div>
+          ${z.next_step ? `<div class="zombie-meta"><span class="label">Next:</span> ${z.next_step}</div>` : ''}
         </div>
-        <div class="zombie-meta">
-          <span class="label">Model:</span> ${z.model_display || z.model}${z.thinking_mode ? ` · <span style="color:#a78bfa">⚡${z.thinking_mode}</span>` : ''}<br>
-          <span class="label">Health:</span> ${healthDot(z.health)}
-          ${z.last_updated ? ` · <span class="label">Updated:</span> ${z.last_updated}` : ''}<br>
-          <span class="label">Commits:</span> ${z.commit_count} · <span class="label">Files:</span> ${z.file_count} (${z.files})
-        </div>
-        <div class="ctx-bar" title="${(z.total_tokens).toLocaleString()} / ${(z.context_max).toLocaleString()} tokens (${z.context_pct}%)"><div class="ctx-fill ${ctxClass(z.context_pct)}" style="width:${Math.min(z.context_pct, 100)}%"></div></div>
-        <div class="zombie-meta">
-          <span class="label">Tokens:</span> ${((z.input_tokens + (z.cache_write || 0) + (z.cache_read || 0) + z.output_tokens)/1000).toFixed(1)}k
-          (In: ${((z.input_tokens + (z.cache_write || 0) + (z.cache_read || 0))/1000).toFixed(1)}k Out: ${(z.output_tokens/1000).toFixed(1)}k)
-          · <span class="label">Cost:</span> $${z.estimated_cost.toFixed(2)}
-        </div>
-        <div class="zombie-summary">${z.summary}</div>
-        ${z.next_step ? `<div class="zombie-meta"><span class="label">Next:</span> ${z.next_step}</div>` : ''}
-      </div>
-    `;
+      `;
+    }
   }
   document.getElementById('zombie-grid').innerHTML = html;
 

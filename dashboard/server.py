@@ -597,7 +597,7 @@ def build_dashboard_data():
         file_list = status.get("files touched", "none")
         file_count = len([f for f in file_list.split(",") if f.strip() and f.strip() != "none"]) if file_list != "none" else 0
 
-        zombies.append({
+        zombie_entry = {
             "id": aid,
             "runtime": runtime,
             "model": model,
@@ -623,7 +623,14 @@ def build_dashboard_data():
             "commit_count": len(commits),
             "commits": commits[:5],
             "latest_message": status.get("summary", ""),
-        })
+        }
+
+        # Detect iterator role — check for iterate ledger
+        iterate_ledger = _load_iterate_ledger(aid)
+        if iterate_ledger or ac.get("role") == "iterator":
+            zombie_entry["iterate"] = iterate_ledger
+
+        zombies.append(zombie_entry)
 
     # Brain stats
     brain_usage = get_token_usage("supervisor") if (BZ_DIR / "agents" / "supervisor").exists() else {"input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_write": 0, "total": 0}
@@ -727,6 +734,42 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     def log_message(self, format, *args):
         pass  # Suppress request logs
+
+
+def _load_iterate_ledger(agent_id: str) -> dict | None:
+    """Load iterate ledger for an agent, if it exists."""
+    # Check in project root and worktree
+    for base in [PROJECT_ROOT, PROJECT_ROOT / ".bz" / "worktrees" / agent_id]:
+        ledger_path = base / ".bz" / "iterate" / "ledger.json"
+        if ledger_path.exists():
+            try:
+                with open(ledger_path) as f:
+                    data = json.load(f)
+                champ = data.get("champion", {})
+                return {
+                    "goal": data.get("goal", {}),
+                    "baseline": data.get("baseline", {}),
+                    "champion_iteration": champ.get("iteration", 0),
+                    "champion_metrics": champ.get("metrics", {}),
+                    "used": data.get("budget", {}).get("used", 0),
+                    "budget": data.get("budget", {}).get("max", 0),
+                    "state": "complete" if data.get("budget", {}).get("used", 0) >= data.get("budget", {}).get("max", 0) else "iterating",
+                    "zombie_model": "sonnet",
+                    "iterations": [
+                        {
+                            "id": it.get("id"),
+                            "hypothesis": it.get("hypothesis", ""),
+                            "metrics": it.get("metrics", {}),
+                            "verdict": it.get("verdict", ""),
+                            "kept": it.get("kept", False),
+                            "duration_sec": it.get("duration_sec", 0),
+                        }
+                        for it in data.get("iterations", [])
+                    ],
+                }
+            except (json.JSONDecodeError, KeyError):
+                return None
+    return None
 
 
 def _handle_teardown():
