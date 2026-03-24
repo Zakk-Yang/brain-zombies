@@ -36,29 +36,107 @@ PRICING = {
 }
 
 
-# Model context window sizes
-CONTEXT_WINDOWS = {
-    "haiku": 200_000,
-    "sonnet": 200_000,
-    "opus": 200_000,
-    "gpt-4.1-nano": 1_047_576,
-    "gpt-4.1-mini": 1_047_576,
-    "gpt-4.1": 1_047_576,
-    "gpt-4o": 128_000,
-    "gpt-4o-mini": 128_000,
-    "gpt-5-nano": 1_047_576,
-    "gpt-5-mini": 1_047_576,
-    "gpt-5": 1_047_576,
-    "gpt-5.4": 1_047_576,
-    "gpt-5.3-codex-spark": 192_000,
-    "gpt-5.3-codex": 192_000,
-    "gpt-5.2-codex": 192_000,
-    "gpt-5.1-codex": 192_000,
-    "gpt-5.1-codex-mini": 192_000,
-    "gpt-5.1-codex-max": 512_000,
-    "o3": 200_000,
-    "o4-mini": 200_000,
-}
+# Model info cache (populated on first request)
+_model_info_cache = {}
+_model_cache_time = 0
+MODEL_CACHE_TTL = 3600  # refresh every hour
+
+
+def _fetch_model_info():
+    """Fetch model context windows and pricing from APIs."""
+    global _model_info_cache, _model_cache_time
+    now = time.time()
+    if _model_info_cache and (now - _model_cache_time) < MODEL_CACHE_TTL:
+        return _model_info_cache
+
+    info = {}
+
+    # Anthropic Models API
+    try:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            # Try reading from claude config
+            claude_config = Path.home() / ".claude" / ".credentials.json"
+            if claude_config.exists():
+                creds = json.loads(claude_config.read_text())
+                api_key = creds.get("claudeAiOauth", {}).get("accessToken", "")
+                if not api_key:
+                    api_key = creds.get("apiKey", "")
+        if api_key:
+            result = subprocess.run(
+                ["curl", "-s", "-H", f"x-api-key: {api_key}",
+                 "-H", "anthropic-version: 2023-06-01",
+                 "https://api.anthropic.com/v1/models"],
+                capture_output=True, text=True, timeout=10
+            )
+            data = json.loads(result.stdout)
+            for m in data.get("data", []):
+                model_id = m.get("id", "")
+                # Map both full ID and alias
+                for name in [model_id, model_id.split("-")[1] if "-" in model_id else model_id]:
+                    info[name] = {
+                        "context_window": m.get("max_input_tokens", 200_000),
+                        "max_output": m.get("max_tokens", 64_000),
+                    }
+                # Also map short aliases: opus, sonnet, haiku
+                if "opus" in model_id:
+                    info["opus"] = info[model_id]
+                elif "sonnet" in model_id and model_id not in info.get("sonnet", {}).get("_id", ""):
+                    info["sonnet"] = info[model_id]
+                elif "haiku" in model_id:
+                    info["haiku"] = info[model_id]
+    except Exception:
+        pass
+
+    # OpenAI Models API
+    try:
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        if not api_key:
+            openai_auth = Path.home() / ".codex" / "auth.json"
+            if openai_auth.exists():
+                creds = json.loads(openai_auth.read_text())
+                api_key = creds.get("api_key", creds.get("token", ""))
+        if api_key and not api_key.startswith("ey"):  # skip OAuth tokens
+            result = subprocess.run(
+                ["curl", "-s", "-H", f"Authorization: Bearer {api_key}",
+                 "https://api.openai.com/v1/models"],
+                capture_output=True, text=True, timeout=10
+            )
+            data = json.loads(result.stdout)
+            for m in data.get("data", []):
+                model_id = m.get("id", "")
+                ctx = m.get("context_window", None)
+                if ctx:
+                    info[model_id] = {"context_window": ctx, "max_output": 0}
+    except Exception:
+        pass
+
+    # Fallback defaults for common models if API calls failed
+    defaults = {
+        "opus": 1_000_000, "sonnet": 1_000_000, "haiku": 200_000,
+        "claude-opus-4-6": 1_000_000, "claude-sonnet-4-6": 1_000_000,
+        "claude-haiku-4-5": 200_000,
+        "gpt-4.1-nano": 1_047_576, "gpt-4.1-mini": 1_047_576, "gpt-4.1": 1_047_576,
+        "gpt-4o": 128_000, "gpt-4o-mini": 128_000,
+        "gpt-5-nano": 1_047_576, "gpt-5-mini": 1_047_576, "gpt-5": 1_047_576,
+        "gpt-5.4": 1_047_576,
+        "gpt-5.3-codex-spark": 192_000, "gpt-5.3-codex": 192_000,
+        "o3": 200_000, "o4-mini": 200_000,
+    }
+    for k, v in defaults.items():
+        if k not in info:
+            info[k] = {"context_window": v, "max_output": 0}
+
+    _model_info_cache = info
+    _model_cache_time = now
+    return info
+
+
+def get_context_window(model):
+    """Get context window for a model, using API data when available."""
+    info = _fetch_model_info()
+    entry = info.get(model, info.get(model.split("/")[-1] if "/" in model else model, {}))
+    return entry.get("context_window", 200_000)
 
 
 def read_yaml():
@@ -364,7 +442,7 @@ def build_dashboard_data():
         usage = get_token_usage(aid)
         cost = estimate_cost_from_usage(usage, model)
         commits = get_commits(aid)
-        context_max = CONTEXT_WINDOWS.get(model, 200_000)
+        context_max = get_context_window(model)
         context_pct = round(usage["total"] / context_max * 100, 1) if context_max else 0
 
         total_tokens += usage["total"]
