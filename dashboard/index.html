@@ -155,8 +155,8 @@ function render(data) {
         </div>
         <div class="ctx-bar" title="${(z.total_tokens).toLocaleString()} / ${(z.context_max).toLocaleString()} tokens (${z.context_pct}%)"><div class="ctx-fill ${ctxClass(z.context_pct)}" style="width:${Math.min(z.context_pct, 100)}%"></div></div>
         <div class="zombie-meta">
-          <span class="label">In:</span> ${((z.input_tokens + (z.cache_write || 0) + (z.cache_read || 0))/1000).toFixed(1)}k
-          <span class="label">Out:</span> ${(z.output_tokens/1000).toFixed(1)}k
+          <span class="label">Tokens:</span> ${((z.input_tokens + (z.cache_write || 0) + (z.cache_read || 0) + z.output_tokens)/1000).toFixed(1)}k
+          (In: ${((z.input_tokens + (z.cache_write || 0) + (z.cache_read || 0))/1000).toFixed(1)}k Out: ${(z.output_tokens/1000).toFixed(1)}k)
           · <span class="label">Cost:</span> $${z.estimated_cost.toFixed(2)}
         </div>
         <div class="zombie-summary">${z.summary}</div>
