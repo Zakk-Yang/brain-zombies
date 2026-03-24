@@ -182,6 +182,8 @@ def get_phase(state, agent_id=None):
         "blocked": "blocked",
         "working": "coding",
         "coding": "coding",
+        "executing": "executing",
+        "running": "executing",
         "testing": "testing",
         "review": "ready-for-review",
         "ready-for-review": "ready-for-review",

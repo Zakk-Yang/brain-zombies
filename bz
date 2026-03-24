@@ -379,8 +379,9 @@ Read ${BZ_DIR}/agents/${agent_id}/BRIEF.md for your task.
 CRITICAL RULES:
 1. After EACH file: git add <file> && git commit -m \"[${agent_id}] <description>\"
 2. After each commit: update ${BZ_DIR}/agents/${agent_id}/STATUS.md with current State, Summary, Files touched, Next step
-3. State lifecycle: starting → working → ready-for-review → done
-   - Set State: working while coding
+3. State lifecycle: starting → working → executing → ready-for-review → done
+   - Set State: working while writing code
+   - Set State: executing when running scripts/experiments (no more code changes, just compute)
    - Set State: ready-for-review when you believe your task is complete (brain will confirm)
    - Only the brain sets State: done after reviewing your work
 
