@@ -159,7 +159,14 @@ check_stalled() {
 
         local state
         state="$(grep '^State:' "${agent_dir}/STATUS.md" 2>/dev/null | head -1 | sed 's/State: //')"
-        [[ "$state" == "done" || "$state" == "blocked" || "$state" == "starting" ]] && continue
+        [[ "$state" == "done" || "$state" == "blocked" || "$state" == "starting" || "$state" == "executing" || "$state" == "running" || "$state" == "ready-for-review" ]] && continue
+
+        # Also skip stall check if summary mentions running/executing
+        local summary
+        summary="$(grep '^Summary:' "${agent_dir}/STATUS.md" 2>/dev/null | head -1 | sed 's/Summary: //' | tr '[:upper:]' '[:lower:]')"
+        if [[ "$summary" == *"running"* || "$summary" == *"experiment"* || "$summary" == *"executing"* || "$summary" == *"training"* ]]; then
+            continue
+        fi
 
         # Check last commit time in worktree
         local wt="${BZ_DIR}/worktrees/${agent_id}"
