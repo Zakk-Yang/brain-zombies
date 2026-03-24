@@ -33,6 +33,7 @@ Commands:
   feedback         Send human feedback to a zombie
   logs <agent>     Tail agent output
   attach <agent>   Attach to agent tmux session
+  iterate          Autonomous improvement loop (brain→zombie→runner→evaluate)
   teardown         Stop all agents gracefully
   clean            Full purge (kill + delete state)
 
@@ -46,7 +47,14 @@ Examples:
   bz status
   bz attach developer
   bz teardown
+
+  bz iterate --goal "ic > 0.10" --runner "./run.sh" --scope "train.py" --budget 10
 EOF
+}
+
+# ── ITERATE ─────────────────────────────────────
+cmd_iterate() {
+    python3 "${SCRIPT_DIR}/lib/iterate.py" "$@"
 }
 
 # ── Helpers ──────────────────────────────────────
@@ -899,6 +907,7 @@ case "${1:-}" in
     attach)    shift; cmd_attach "$@" ;;
     logs)      shift; cmd_logs "$@" ;;
     feedback)  shift; cmd_feedback "$@" ;;
+    iterate)   shift; cmd_iterate "$@" ;;
     teardown)  shift; cmd_teardown "$@" ;;
     clean)     shift; cmd_clean "$@" ;;
     -v|--version) echo "bz v${VERSION}" ;;

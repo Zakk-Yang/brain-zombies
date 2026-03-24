@@ -706,8 +706,69 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         else:
             super().do_GET()
 
+    def do_POST(self):
+        if self.path == "/api/teardown":
+            result = _handle_teardown()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
     def log_message(self, format, *args):
         pass  # Suppress request logs
+
+
+def _handle_teardown():
+    """Kill all tmux sessions and reconcile loop for this project."""
+    killed = []
+
+    # Read project name from bz.yaml (parse without yaml dependency)
+    bz_yaml = PROJECT_ROOT / "bz.yaml"
+    project_name = "unknown"
+    if bz_yaml.exists():
+        for line in bz_yaml.read_text().splitlines():
+            m = re.match(r'\s*name:\s*(.+)', line)
+            if m:
+                project_name = m.group(1).strip().strip('"').strip("'")
+                break
+
+    # Kill reconcile loop
+    pid_file = BZ_DIR / "reconcile.pid"
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, 9)
+            killed.append(f"reconcile (PID {pid})")
+        except (ProcessLookupError, ValueError):
+            pass
+        pid_file.unlink(missing_ok=True)
+
+    # Kill all bz- tmux sessions for this project
+    try:
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True,
+        )
+        for sess in result.stdout.strip().splitlines():
+            if sess.startswith(f"bz-{project_name}"):
+                subprocess.run(["tmux", "kill-session", "-t", sess],
+                               capture_output=True)
+                killed.append(f"session: {sess}")
+    except FileNotFoundError:
+        pass
+
+    return {"status": "ok", "killed": killed}
 
 
 if __name__ == "__main__":

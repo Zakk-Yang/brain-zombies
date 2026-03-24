@@ -95,7 +95,10 @@ main { max-width: 1200px; margin: 0 auto; padding: 1rem; }
 <body>
 <header>
   <h1>🧠🧟 brain-zombies <span id="project-name"></span></h1>
-  <div class="updated" id="updated"></div>
+  <div style="display:flex;align-items:center;gap:1rem;">
+    <button id="teardown-btn" onclick="teardownAll()" style="background:#dc2626;color:#fff;border:none;padding:0.4rem 1rem;border-radius:6px;cursor:pointer;font-size:0.8rem;font-weight:600;">Kill All</button>
+    <div class="updated" id="updated"></div>
+  </div>
 </header>
 <main>
   <div class="project-bar" id="project-bar"></div>
@@ -105,6 +108,22 @@ main { max-width: 1200px; margin: 0 auto; padding: 1rem; }
   <div class="log-panel" id="log-panel"><h2>Message Log</h2><div id="log-entries"></div></div>
 </main>
 <script>
+async function teardownAll() {
+  if (!confirm('Kill all zombies and stop the brain?')) return;
+  const btn = document.getElementById('teardown-btn');
+  btn.textContent = 'Killing...';
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/teardown', { method: 'POST' });
+    const data = await res.json();
+    btn.textContent = `Killed ${data.killed.length}`;
+    btn.style.background = '#374151';
+    setTimeout(() => { btn.textContent = 'Kill All'; btn.disabled = false; btn.style.background = '#dc2626'; }, 3000);
+  } catch(e) {
+    btn.textContent = 'Error';
+    setTimeout(() => { btn.textContent = 'Kill All'; btn.disabled = false; }, 2000);
+  }
+}
 function phaseClass(p) { return `phase-${p || 'unknown'}`; }
 function healthDot(h) { return `<span class="health-dot health-${h}"></span>${h}`; }
 function ctxClass(pct) { return pct > 70 ? 'high' : pct > 40 ? 'mid' : 'low'; }

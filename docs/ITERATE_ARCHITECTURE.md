@@ -1,196 +1,170 @@
-# bz iterate — Autonomous Iterative Research
+# bz iterate — Autonomous Improvement Loop
 
 ## Overview
 
-`bz iterate` runs an autonomous experiment loop where the brain:
-1. Reads the goal and baseline
-2. Analyzes past results
-3. Plans the next experiment
-4. Assigns a zombie to implement it
-5. Runs the experiment
-6. Evaluates results
-7. Decides: continue, pivot, or stop
+A **generalized** framework for iterative improvement of any measurable system.
+Brain plans, zombie codes, runner evaluates, git keeps or discards.
+
+Inspired by [Karpathy's autoresearch](https://github.com/karpathy/autoresearch),
+extended with brain/zombie separation, structured stop conditions, and keep/discard
+git history.
+
+## Design Principles
+
+1. **Runner is sacred** — evaluation cannot be gamed by the zombie
+2. **Scope is explicit** — zombie edits ONLY specified files
+3. **Keep/discard via git** — branch history = only improvements
+4. **Brain = search strategy** — LLM judgment, not grid search
+5. **Fixed time budget** — experiments are comparable
+6. **One change per iteration** — isolate variables
 
 ## Command
 
 ```bash
 bz iterate \
-  --goal "top_decile_precision > 0.25, ic > 0.04" \
-  --baseline outputs/baseline_xgb/metrics.json \
+  --goal "ic > 0.20, hit_rate > 0.65" \
+  --runner "./run.sh" \
+  --scope "train.py" \
   --budget 20 \
+  --time-limit 60 \
   --brain opus \
-  --zombie sonnet \
-  --experiment-runner "python scripts/run_experiment.py --config {config}" \
-  --max-cost 50.0
+  --zombie sonnet
 ```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--goal` | required | Comma-separated `metric > value` conditions |
+| `--runner` | required | Command that outputs JSON metrics to stdout |
+| `--scope` | required | Comma-separated files/dirs zombie can edit |
+| `--budget` | 20 | Max iterations |
+| `--time-limit` | 300 | Seconds per runner execution |
+| `--brain` | opus | Model for strategic planning |
+| `--zombie` | sonnet | Model for code changes |
+| `--verbose` | false | Show runner stderr on failure |
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                  bz iterate loop                      │
-│                                                       │
-│  ┌─────────────┐    ┌──────────┐    ┌──────────────┐ │
-│  │  BRAIN       │───→│  ZOMBIE  │───→│  RUNNER      │ │
-│  │  (opus)      │    │  (sonnet)│    │  (python)    │ │
-│  │              │    │          │    │              │ │
-│  │ • analyze    │    │ • code   │    │ • execute    │ │
-│  │ • plan       │    │ • commit │    │ • measure    │ │
-│  │ • decide     │    │ • test   │    │ • log        │ │
-│  └──────┬───────┘    └──────────┘    └──────┬───────┘ │
-│         │                                    │        │
-│         └────────────── LEDGER ◄─────────────┘        │
-│                     (experiment log)                   │
-└──────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│                    bz iterate loop                      │
+│                                                         │
+│  ┌──────────┐    ┌──────────┐    ┌──────────────────┐  │
+│  │  BRAIN    │───→│  ZOMBIE  │───→│  RUNNER          │  │
+│  │  (opus)   │    │  (sonnet)│    │  (user script)   │  │
+│  │           │    │          │    │                   │  │
+│  │ • analyze │    │ • edit   │    │ • execute         │  │
+│  │ • plan    │    │ • verify │    │ • measure         │  │
+│  │ • decide  │    │          │    │ • output JSON     │  │
+│  └─────┬─────┘    └──────────┘    └────────┬─────────┘  │
+│        │                                    │           │
+│        └────────────── LEDGER ◄─────────────┘           │
+│                                                         │
+│  KEEP ──→ advance commit (new champion)                 │
+│  DISCARD → git reset --hard (revert to champion)        │
+└────────────────────────────────────────────────────────┘
 ```
 
-## Experiment Ledger (.bz/iterate/ledger.json)
+## Contracts
+
+### Runner Contract
+
+The runner is a **black box** the zombie cannot modify. It must:
+
+1. Execute the current code (train, predict, etc.)
+2. Evaluate results against a **fixed** test set
+3. Output a JSON object to stdout with numeric metrics
+4. Exit 0 on success, non-zero on failure
+5. Complete within `--time-limit` seconds
+
+```bash
+# Example runner (run.sh)
+#!/bin/bash
+set -e
+python3 train.py        # mutable — zombie edits this
+python3 evaluate.py      # sacred — fixed evaluation
+```
+
+### Scope Contract
+
+The zombie can ONLY edit files listed in `--scope`. Everything else is read-only.
+This is autoresearch's `prepare.py` vs `train.py` generalized.
+
+```
+--scope "train.py"                    # single file
+--scope "train.py,configs/"           # file + directory
+--scope "src/model.py,src/features/"  # multiple paths
+```
+
+### Goal Contract
+
+Goals are metric conditions parsed from `--goal`:
+
+```
+"ic > 0.20"                    # single metric
+"accuracy > 0.95, loss < 0.05" # multiple (all must be met)
+"latency < 100, throughput > 1000"  # non-ML works too
+```
+
+## Loop Flow
+
+```
+1. INIT
+   ├── Check clean git worktree
+   ├── Run baseline (first runner execution)
+   └── Create ledger with baseline as champion
+
+2. LOOP (while budget > 0 and not plateau)
+   ├── BRAIN: reads goal + champion + history + scoped files
+   │   └── Outputs: { hypothesis, zombie_instructions, expected_impact }
+   │
+   ├── ZOMBIE: receives instructions, edits scoped files
+   │   └── Does NOT commit, does NOT run experiments
+   │
+   ├── COMMIT: git add <scope> && git commit
+   │
+   ├── RUNNER: execute with timeout
+   │   └── Parse JSON metrics from stdout
+   │
+   ├── EVALUATE: compare metrics to champion
+   │   ├── IMPROVED → keep commit (new champion)
+   │   └── NOT IMPROVED → git reset --hard (discard)
+   │
+   └── LEDGER: record iteration (kept or discarded)
+
+3. STOP when:
+   ├── Goal met (all conditions satisfied)
+   ├── Budget exhausted (max iterations)
+   ├── Plateau (5 consecutive failures)
+   └── Human override (Ctrl-C)
+```
+
+## Ledger (.bz/iterate/ledger.json)
 
 ```json
 {
-  "goal": {
-    "top_decile_precision": ">0.25",
-    "ic": ">0.04"
-  },
-  "baseline": {
-    "top_decile_precision": 0.215,
-    "quintile_spread": 0.155,
-    "ic": 0.036,
-    "ic_ir": 0.162,
-    "source": "quant-lab XGB v8 32-feature"
-  },
+  "goal": { "ic": ">0.20", "hit_rate": ">0.65" },
+  "baseline": { "ic": 0.152, "hit_rate": 0.658 },
   "champion": {
-    "iteration": 5,
-    "top_decile_precision": 0.228,
-    "ic": 0.039,
-    "config": "configs/iter_005_cross_sectional.yaml"
+    "iteration": 3,
+    "metrics": { "ic": 0.198, "hit_rate": 0.671 },
+    "commit": "a1b2c3d4"
   },
-  "budget": { "max_iterations": 20, "used": 7, "max_cost": 50.0, "spent": 12.30 },
+  "budget": { "max": 20, "used": 5 },
+  "last_good_commit": "a1b2c3d4e5f6...",
   "iterations": [
     {
       "id": 1,
-      "hypothesis": "Adding 28 more features will close IC gap from 0.022 to 0.036",
-      "changes": "Added 28 daily features to src/features/daily.py",
-      "config": "configs/iter_001_more_features.yaml",
-      "results": { "ic": 0.032, "top_decile_precision": 0.206 },
-      "vs_baseline": { "ic": -0.004, "top_decile_precision": -0.009 },
-      "verdict": "IMPROVED over previous but still below baseline",
-      "duration_min": 3.2,
-      "cost": 1.50
-    },
-    {
-      "id": 2,
-      "hypothesis": "Cross-sectional features (sector-relative) will improve quintile spread",
-      "changes": "Added 5 cross-sectional features",
-      "config": "configs/iter_002_cross_sectional.yaml",
-      "results": { "ic": 0.039, "top_decile_precision": 0.228 },
-      "vs_baseline": { "ic": "+0.003", "top_decile_precision": "+0.013" },
-      "verdict": "NEW CHAMPION — beats baseline on both metrics",
-      "duration_min": 4.1,
-      "cost": 1.80
+      "hypothesis": "Adding RSI and MACD features will improve IC",
+      "changes": "Added 2 features to compute_features()",
+      "metrics": { "ic": 0.178, "hit_rate": 0.662 },
+      "vs_champion": { "ic": {"old": 0.152, "new": 0.178, "delta": 0.026} },
+      "verdict": "IMPROVED",
+      "duration_sec": 2.3,
+      "kept": true,
+      "timestamp": "2026-03-24T19:30:00"
     }
   ]
 }
-```
-
-## Brain Prompt Template
-
-Each iteration, the brain receives:
-
-```
-ROLE: You are a quantitative research lead. Your goal: {goal}
-
-BASELINE TO BEAT:
-{baseline metrics}
-
-CURRENT CHAMPION (iteration {n}):
-{champion metrics}
-
-EXPERIMENT HISTORY:
-{last 5 iterations with hypothesis → result → verdict}
-
-AVAILABLE TOOLS:
-- Modify feature set (src/features/daily.py has {n} features)
-- Change target (current: {target}, options: residual/rank/vol_adjusted × 5/10/21/42d)
-- Tune model params (current: {model_config})
-- Change model type (XGB, LightGBM, MLP)
-
-YOUR TASK:
-1. Analyze: why hasn't the goal been met yet? What's the biggest gap?
-2. Hypothesize: what specific change would most likely improve results?
-3. Plan: output a JSON with:
-   {
-     "hypothesis": "...",
-     "action": "modify_features|change_target|tune_model|change_model",
-     "changes_description": "...",
-     "zombie_task": "... specific instructions for the coding zombie ...",
-     "config_overrides": { ... },
-     "expected_impact": "IC +0.005, top_decile +0.01"
-   }
-
-RULES:
-- Only ONE change per iteration (isolate variables)
-- If last 3 iterations all failed, try a completely different direction
-- If overfit_ratio > 2.0, add more regularization before trying new features
-- Stop if: goal met, or 3 consecutive iterations with no improvement
-```
-
-## Iterate Loop (lib/iterate.sh or Python)
-
-```python
-def iterate(goal, baseline, budget, brain_model, zombie_model, runner_cmd):
-    ledger = load_or_create_ledger(goal, baseline, budget)
-
-    while ledger.budget_remaining() and not ledger.goal_met():
-        # 1. Brain decides next experiment
-        brain_output = call_brain(
-            model=brain_model,
-            prompt=build_brain_prompt(ledger),
-        )
-        plan = parse_brain_plan(brain_output)
-
-        # 2. Zombie implements changes
-        if plan.needs_code_changes:
-            zombie_output = spawn_zombie(
-                model=zombie_model,
-                task=plan.zombie_task,
-            )
-            wait_for_zombie(zombie_output)
-
-        # 3. Generate experiment config
-        config_path = generate_config(plan.config_overrides, ledger.iteration_id)
-
-        # 4. Run experiment
-        start = time.time()
-        result = run_experiment(runner_cmd.format(config=config_path))
-        duration = time.time() - start
-
-        # 5. Evaluate
-        metrics = parse_results(result)
-        verdict = evaluate_vs_baseline(metrics, ledger.champion, ledger.baseline)
-
-        # 6. Update ledger
-        ledger.add_iteration(
-            hypothesis=plan.hypothesis,
-            changes=plan.changes_description,
-            config=config_path,
-            results=metrics,
-            verdict=verdict,
-            duration=duration,
-        )
-
-        if verdict == "NEW_CHAMPION":
-            ledger.update_champion(metrics, config_path)
-
-        # 7. Brain decides: continue or stop
-        if ledger.consecutive_failures >= 3:
-            # Brain gets a special "pivot" prompt
-            pass
-
-        ledger.save()
-        log_iteration(ledger.latest)
-
-    print_summary(ledger)
 ```
 
 ## Directory Structure
@@ -198,46 +172,30 @@ def iterate(goal, baseline, budget, brain_model, zombie_model, runner_cmd):
 ```
 .bz/
   iterate/
-    ledger.json              ← experiment history
+    ledger.json              ← experiment history (kept + discarded)
     plans/
-      iter_001_plan.json     ← brain's plan for each iteration
-      iter_002_plan.json
-    configs/
-      iter_001.yaml          ← generated experiment config
-      iter_002.yaml
-    results/
-      iter_001_metrics.json  ← experiment results
-      iter_002_metrics.json
+      iter_001.json          ← brain's plan for each iteration
+      iter_002.json
     logs/
-      iter_001_zombie.log    ← zombie output
-      iter_001_run.log       ← experiment stdout
+      iter_001_zombie.log    ← zombie stdout/stderr
+      iter_002_zombie.log
 ```
 
-## Dashboard Integration
+## Use Cases
 
-The dashboard shows:
+Works for any project with measurable output:
 
-```
-ITERATE MODE: 7/20 iterations | Champion: IC=0.039 (iteration 2) | Goal: IC>0.04
+| Domain | Goal | Runner | Scope |
+|--------|------|--------|-------|
+| Quant signal | `ic > 0.04` | `python run_cv.py` | `src/features/`, `configs/` |
+| ML model | `accuracy > 0.95` | `python train.py && python eval.py` | `model.py` |
+| Code perf | `latency < 100` | `./bench.sh` | `src/engine.py` |
+| LLM training | `val_bpb < 1.0` | `python train.py` | `train.py` |
+| Test coverage | `coverage > 90` | `pytest --cov` | `src/`, `tests/` |
 
-[Progress Chart]
-  iter 1: IC=0.032 ↑ features
-  iter 2: IC=0.039 ★ champion (cross-sectional)
-  iter 3: IC=0.035 ↓ target change
-  iter 4: IC=0.038 → model tuning
-  iter 5: IC=0.039 → same
-  iter 6: IC=0.041 ★ NEW CHAMPION (goal: IC>0.04 ✓)
-  iter 7: IC=0.040 → refinement
+## Resume
 
-[Latest Brain Decision]
-  "IC goal met. Quintile spread still below baseline.
-   Next: add momentum persistence features to improve ranking depth."
-```
-
-## Stop Conditions
-
-1. **Goal met** — all target metrics exceeded
-2. **Budget exhausted** — max iterations or max cost reached
-3. **Plateau** — 3 consecutive iterations with no improvement
-4. **Overfit** — overfit_ratio > 3.0 for 2 consecutive iterations
-5. **Human override** — `bz iterate --stop`
+If interrupted, `bz iterate` resumes automatically:
+- Detects existing `ledger.json` and loads state
+- Continues from last completed iteration
+- Champion and `last_good_commit` are preserved
