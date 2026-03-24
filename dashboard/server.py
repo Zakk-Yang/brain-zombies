@@ -413,7 +413,7 @@ def get_message_log():
     # From reconcile log — parse nerve signals and brain wakes
     log_path = BZ_DIR / "logs" / "reconcile.log"
     if log_path.exists():
-        for line in log_path.read_text().splitlines()[-50:]:
+        for line in log_path.read_text().splitlines():
             # [nerve] HH:MM:SS State change: agent_name
             m = re.match(r'\[(\w+)\]\s+(\d{2}:\d{2}:\d{2})\s+(.*)', line)
             if m:
@@ -468,7 +468,7 @@ def get_message_log():
     # From feedback log
     fb_path = BZ_DIR / "logs" / "feedback.log"
     if fb_path.exists():
-        for line in fb_path.read_text().splitlines()[-20:]:
+        for line in fb_path.read_text().splitlines():
             parts = line.split(" | ", 2)
             if len(parts) >= 3:
                 ts = parts[0][-8:] if len(parts[0]) > 8 else parts[0]  # HH:MM:SS
@@ -485,7 +485,7 @@ def get_message_log():
     try:
         result = subprocess.run(
             ["git", "-C", str(PROJECT_ROOT), "log", "--all",
-             "--format=%ct %s", "--since=2 hours ago"],
+             "--format=%ct %s", ],
             capture_output=True, text=True, timeout=5
         )
         for line in result.stdout.strip().split("\n"):
@@ -508,7 +508,7 @@ def get_message_log():
         pass
 
     messages.sort(key=lambda m: m.get("time", ""))
-    return messages[-100:]
+    return messages
 
 
 def build_dashboard_data():
