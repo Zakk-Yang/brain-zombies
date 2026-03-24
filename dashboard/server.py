@@ -376,6 +376,21 @@ def resolve_model_display(runtime, model):
     return full
 
 
+# Models that support extended thinking
+THINKING_MODELS = {
+    "opus", "claude-opus-4-6", "claude-opus-4-5",
+    "sonnet", "claude-sonnet-4-6", "claude-sonnet-4-5",
+    "o3", "o4-mini", "o3-mini",
+    "gpt-5.3-codex-spark", "gpt-5.3-codex",
+}
+
+def get_thinking_mode(model):
+    """Return thinking mode label for a model."""
+    if model in THINKING_MODELS or any(model.startswith(p) for p in ["claude-opus", "claude-sonnet", "o3", "o4"]):
+        return "thinking"
+    return None
+
+
 def get_last_updated(status):
     """Get last updated timestamp from STATUS.md."""
     return status.get("last updated", "")
@@ -539,6 +554,7 @@ def build_dashboard_data():
         total_cost += cost
 
         model_display = resolve_model_display(runtime, model)
+        thinking_mode = get_thinking_mode(model)
         last_updated = get_last_updated(status)
         file_list = status.get("files touched", "none")
         file_count = len([f for f in file_list.split(",") if f.strip() and f.strip() != "none"]) if file_list != "none" else 0
@@ -548,6 +564,7 @@ def build_dashboard_data():
             "runtime": runtime,
             "model": model,
             "model_display": model_display,
+            "thinking_mode": thinking_mode,
             "phase": phase,
             "health": health,
             "state": state,
@@ -593,6 +610,7 @@ def build_dashboard_data():
             pass
     elapsed = int(end_time - start_time) if start_time else 0
 
+    supervisor_thinking = get_thinking_mode(supervisor.get("model", ""))
     supervisor_model_display = resolve_model_display(
         supervisor.get("runtime", ""), supervisor.get("model", ""))
 
@@ -611,6 +629,7 @@ def build_dashboard_data():
             "runtime": supervisor.get("runtime", ""),
             "model": supervisor.get("model", ""),
             "model_display": supervisor_model_display,
+            "thinking_mode": supervisor_thinking,
             "tokens": brain_tokens,
             "estimated_cost": brain_cost,
             "status": "idle" if all_done else "monitoring",

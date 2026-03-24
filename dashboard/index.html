@@ -130,7 +130,7 @@ function render(data) {
   document.getElementById('brain-panel').innerHTML = `
     <h2>🧠 Brain (Supervisor)</h2>
     <div class="brain-meta">
-      <span><span class="label">Model:</span> ${data.brain.model_display || data.brain.model}</span>
+      <span><span class="label">Model:</span> ${data.brain.model_display || data.brain.model}${data.brain.thinking_mode ? ` · <span style="color:#a78bfa">⚡${data.brain.thinking_mode}</span>` : ''}</span>
       <span><span class="label">Status:</span> ${data.brain.status}</span>
       <span><span class="label">Tokens:</span> ${(data.brain.tokens/1000).toFixed(1)}k</span>
       <span><span class="label">Cost:</span> $${data.brain.estimated_cost.toFixed(3)}</span>
@@ -148,7 +148,7 @@ function render(data) {
           <span class="zombie-phase ${phaseClass(z.phase)}">${z.phase}</span>
         </div>
         <div class="zombie-meta">
-          <span class="label">Model:</span> ${z.model_display || z.model}<br>
+          <span class="label">Model:</span> ${z.model_display || z.model}${z.thinking_mode ? ` · <span style="color:#a78bfa">⚡${z.thinking_mode}</span>` : ''}<br>
           <span class="label">Health:</span> ${healthDot(z.health)}
           ${z.last_updated ? ` · <span class="label">Updated:</span> ${z.last_updated}` : ''}<br>
           <span class="label">Commits:</span> ${z.commit_count} · <span class="label">Files:</span> ${z.file_count} (${z.files})
