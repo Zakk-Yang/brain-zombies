@@ -262,7 +262,7 @@ def get_token_usage(agent_id):
                 if agent_id in d.name and "worktree" in d.name:
                     claude_dir = d
                     break
-    if claude_dir.exists():
+    if claude_dir is not None and claude_dir.exists():
         for jsonl in sorted(claude_dir.glob("*.jsonl"), key=os.path.getmtime, reverse=True)[:1]:
             try:
                 for line in jsonl.read_text().splitlines():
