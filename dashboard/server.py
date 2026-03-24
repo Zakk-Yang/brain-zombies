@@ -252,6 +252,9 @@ def get_health(agent_id, state):
                 and "$ cd " not in l
                 and "$ claude " not in l
                 and "$ codex " not in l
+                and "PROMPT.txt" not in l
+                and "RESTART_PROMPT" not in l
+                and "dangerously-skip" not in l
                 and not l.strip().startswith("cd ")
                 and not l.strip().startswith("claude ")
                 and not l.strip().startswith("codex ")
