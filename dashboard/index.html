@@ -83,6 +83,7 @@ main { max-width: 1200px; margin: 0 auto; padding: 1rem; }
 .log-source.human { color: #f59e0b; }
 .log-msg { color: #c8d0da; }
 .log-msg.commit { color: #22c55e; }
+.log-msg.feedback { color: #f59e0b; }
 </style>
 </head>
 <body>
@@ -111,23 +112,25 @@ function render(data) {
   document.getElementById('project-name').textContent = `— ${data.project.name}`;
   document.getElementById('updated').textContent = `Updated ${data.updated_at}`;
 
-  // Project bar
+  // Project bar (includes cost)
   document.getElementById('project-bar').innerHTML = `
     <div class="stat"><div class="stat-value">${data.project.state.toUpperCase()}</div><div class="stat-label">Status</div></div>
     <div class="stat"><div class="stat-value">${data.project.zombies_done}/${data.project.zombies_total}</div><div class="stat-label">Zombies Done</div></div>
     <div class="stat"><div class="stat-value">${data.project.total_commits}</div><div class="stat-label">Commits</div></div>
-    <div class="stat"><div class="stat-value">${data.project.elapsed_display}</div><div class="stat-label">Elapsed</div></div>
-    <div class="stat"><div class="stat-value">$${data.cost.total.toFixed(2)}</div><div class="stat-label">Total Cost</div></div>
+    <div class="stat"><div class="stat-value">${data.project.elapsed_display}</div><div class="stat-label">Elapsed${data.project.state === 'complete' ? ' (final)' : ''}</div></div>
+    <div class="stat"><div class="stat-value">$${data.cost.total.toFixed(3)}</div><div class="stat-label">Total Cost</div></div>
+    <div class="stat"><div class="stat-value">$${data.cost.brain.toFixed(3)}</div><div class="stat-label">Brain Cost</div></div>
+    <div class="stat"><div class="stat-value">$${data.cost.zombies.toFixed(3)}</div><div class="stat-label">Zombie Cost</div></div>
   `;
 
   // Brain
   document.getElementById('brain-panel').innerHTML = `
     <h2>🧠 Brain (Supervisor)</h2>
     <div class="brain-meta">
-      <span>${data.brain.runtime}/${data.brain.model}</span>
-      <span>Status: ${data.brain.status}</span>
-      <span>Tokens: ${(data.brain.tokens/1000).toFixed(1)}k</span>
-      <span>Cost: $${data.brain.estimated_cost.toFixed(3)}</span>
+      <span><span class="label">Model:</span> ${data.brain.model_display || data.brain.model}</span>
+      <span><span class="label">Status:</span> ${data.brain.status}</span>
+      <span><span class="label">Tokens:</span> ${(data.brain.tokens/1000).toFixed(1)}k</span>
+      <span><span class="label">Cost:</span> $${data.brain.estimated_cost.toFixed(3)}</span>
     </div>
   `;
 
@@ -142,9 +145,10 @@ function render(data) {
           <span class="zombie-phase ${phaseClass(z.phase)}">${z.phase}</span>
         </div>
         <div class="zombie-meta">
-          <span class="label">Runtime:</span> ${z.runtime}/${z.model}<br>
-          <span class="label">Health:</span> ${healthDot(z.health)}<br>
-          <span class="label">Commits:</span> ${z.commit_count} <span class="label">Files:</span> ${z.files}
+          <span class="label">Model:</span> ${z.model_display || z.model}<br>
+          <span class="label">Health:</span> ${healthDot(z.health)}
+          ${z.last_updated ? ` · <span class="label">Updated:</span> ${z.last_updated}` : ''}<br>
+          <span class="label">Commits:</span> ${z.commit_count} · <span class="label">Files:</span> ${z.file_count} (${z.files})
         </div>
         <div class="ctx-bar" title="${(z.total_tokens).toLocaleString()} / ${(z.context_max).toLocaleString()} tokens (${z.context_pct}%)"><div class="ctx-fill ${ctxClass(z.context_pct)}" style="width:${Math.min(z.context_pct, 100)}%"></div></div>
         <div class="zombie-meta">
@@ -161,20 +165,18 @@ function render(data) {
   }
   document.getElementById('zombie-grid').innerHTML = html;
 
-  // Cost
-  let costHtml = `<span class="cost-item">🧠 Brain: <strong>$${data.cost.brain.toFixed(3)}</strong></span>`;
-  for (const z of data.zombies) {
-    costHtml += `<span class="cost-item">🧟 ${z.id}: <strong>$${z.estimated_cost.toFixed(3)}</strong></span>`;
-  }
-  costHtml += `<span class="cost-item">Total: <strong>$${data.cost.total.toFixed(2)}</strong></span>`;
-  document.getElementById('cost-bar').innerHTML = costHtml;
+  // Cost bar removed — integrated into project bar above
 
-  // Messages
+  // Messages (from → to flow)
   let logHtml = '';
   for (const m of data.messages) {
-    const sc = sourceClass(m.source);
-    const mc = m.message.startsWith('COMMIT') ? 'commit' : '';
-    logHtml += `<div class="log-entry"><span class="log-time">${m.time}</span><span class="log-source ${sc}">${m.source}</span><span class="log-msg ${mc}">${m.message}</span></div>`;
+    const typeClass = m.type === 'commit' ? 'commit' : m.type === 'feedback' ? 'feedback' : '';
+    const arrow = m.to ? ` → ${m.to}` : '';
+    logHtml += `<div class="log-entry">
+      <span class="log-time">${m.time}</span>
+      <span class="log-source ${sourceClass(m.from || '')}">${m.from || ''}${arrow}</span>
+      <span class="log-msg ${typeClass}">${m.message}</span>
+    </div>`;
   }
   document.getElementById('log-entries').innerHTML = logHtml;
   // Auto-scroll to bottom

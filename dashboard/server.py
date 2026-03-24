@@ -323,13 +323,11 @@ def estimate_cost_from_usage(usage, model):
 
 
 def get_commits(agent_id):
-    """Get commit count and list for agent."""
-    wt = BZ_DIR / "worktrees" / agent_id
-    if not wt.exists():
-        wt = PROJECT_ROOT
+    """Get commit count and list for agent from all branches."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(wt), "log", "--oneline", f"--grep=[{agent_id}]"],
+            ["git", "-C", str(PROJECT_ROOT), "log", "--all", "--oneline",
+             f"--grep=[{agent_id}]"],
             capture_output=True, text=True, timeout=5
         )
         lines = [l for l in result.stdout.strip().split("\n") if l]
@@ -338,21 +336,57 @@ def get_commits(agent_id):
         return []
 
 
+def resolve_model_display(runtime, model):
+    """Resolve short model alias to full versioned name."""
+    aliases = {
+        "opus": "claude-opus-4-6",
+        "sonnet": "claude-sonnet-4-6",
+        "haiku": "claude-haiku-4-5",
+    }
+    full = aliases.get(model, model)
+    return full
+
+
+def get_last_updated(status):
+    """Get last updated timestamp from STATUS.md."""
+    return status.get("last updated", "")
+
+
 def get_message_log():
-    """Build message log from reconcile log + git log + status changes."""
+    """Build message log with role → target flow and timestamps."""
     messages = []
 
-    # From reconcile log
+    # From reconcile log — parse nerve signals and brain wakes
     log_path = BZ_DIR / "logs" / "reconcile.log"
     if log_path.exists():
         for line in log_path.read_text().splitlines()[-50:]:
-            m = re.match(r'\[(\w+)\]\s+(\S+)\s+(.*)', line)
+            # [nerve] HH:MM:SS State change: agent_name
+            m = re.match(r'\[(\w+)\]\s+(\d{2}:\d{2}:\d{2})\s+(.*)', line)
             if m:
-                messages.append({
-                    "time": m.group(2),
-                    "source": f"🧠 {m.group(1).upper()}",
-                    "message": m.group(3),
-                })
+                source = m.group(1)
+                ts = m.group(2)
+                msg = m.group(3)
+
+                if "WAKE brain" in msg:
+                    # Extract mode and reason
+                    mode_m = re.search(r'\((\w+)\)', msg)
+                    mode = mode_m.group(1) if mode_m else "signal"
+                    messages.append({
+                        "time": ts,
+                        "from": "🔔 nerve",
+                        "to": "🧠 brain",
+                        "message": f"{mode}: {msg.split(':',1)[-1].strip()}",
+                        "type": "signal",
+                    })
+                elif "State change" in msg:
+                    agents = msg.split(":")[-1].strip()
+                    messages.append({
+                        "time": ts,
+                        "from": f"🧟 {agents.strip()}",
+                        "to": "🔔 nerve",
+                        "message": "STATUS.md changed",
+                        "type": "state",
+                    })
 
     # From feedback log
     fb_path = BZ_DIR / "logs" / "feedback.log"
@@ -360,17 +394,21 @@ def get_message_log():
         for line in fb_path.read_text().splitlines()[-20:]:
             parts = line.split(" | ", 2)
             if len(parts) >= 3:
+                ts = parts[0][-8:] if len(parts[0]) > 8 else parts[0]  # HH:MM:SS
+                target = parts[1].replace("target=", "")
                 messages.append({
-                    "time": parts[0][:19],
-                    "source": "👤 HUMAN",
-                    "message": parts[2],
+                    "time": ts,
+                    "from": "👤 human",
+                    "to": f"🧟 {target}",
+                    "message": parts[2][:80],
+                    "type": "feedback",
                 })
 
     # From git log (all branches)
     try:
         result = subprocess.run(
-            ["git", "-C", str(PROJECT_ROOT), "log", "--all", "--oneline",
-             "--format=%ct %s", "--since=1 hour ago"],
+            ["git", "-C", str(PROJECT_ROOT), "log", "--all",
+             "--format=%ct %s", "--since=2 hours ago"],
             capture_output=True, text=True, timeout=5
         )
         for line in result.stdout.strip().split("\n"):
@@ -380,18 +418,18 @@ def get_message_log():
             if len(parts) == 2:
                 ts = datetime.fromtimestamp(int(parts[0])).strftime("%H:%M:%S")
                 msg = parts[1]
-                # Extract agent from commit prefix
                 cm = re.match(r'\[(\w+[-\w]*)\]\s*(.*)', msg)
                 if cm:
                     messages.append({
                         "time": ts,
-                        "source": f"🧟 {cm.group(1)}",
-                        "message": f"COMMIT: {cm.group(2)}",
+                        "from": f"🧟 {cm.group(1)}",
+                        "to": "📁 git",
+                        "message": cm.group(2),
+                        "type": "commit",
                     })
     except Exception:
         pass
 
-    # Sort by time
     messages.sort(key=lambda m: m.get("time", ""))
     return messages[-100:]
 
@@ -448,17 +486,25 @@ def build_dashboard_data():
         total_tokens += usage["total"]
         total_cost += cost
 
+        model_display = resolve_model_display(runtime, model)
+        last_updated = get_last_updated(status)
+        file_list = status.get("files touched", "none")
+        file_count = len([f for f in file_list.split(",") if f.strip() and f.strip() != "none"]) if file_list != "none" else 0
+
         zombies.append({
             "id": aid,
             "runtime": runtime,
             "model": model,
+            "model_display": model_display,
             "phase": phase,
             "health": health,
             "state": state,
             "summary": status.get("summary", "No summary"),
-            "files": status.get("files touched", "none"),
+            "files": file_list,
+            "file_count": file_count,
             "next_step": status.get("next step", ""),
             "blocker": status.get("blocker", "none"),
+            "last_updated": last_updated,
             "input_tokens": usage["input_tokens"],
             "output_tokens": usage["output_tokens"],
             "cache_read": usage["cache_read"],
@@ -481,7 +527,22 @@ def build_dashboard_data():
     all_done = all(z["phase"] == "done" for z in zombies) if zombies else False
     zombies_done = sum(1 for z in zombies if z["phase"] == "done")
 
-    elapsed = int(time.time() - start_time) if start_time else 0
+    # Elapsed: stop counting when all done (use last commit time as end)
+    end_time = time.time()
+    if all_done:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(PROJECT_ROOT), "log", "--all", "--format=%ct", "-1"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.stdout.strip():
+                end_time = int(result.stdout.strip())
+        except Exception:
+            pass
+    elapsed = int(end_time - start_time) if start_time else 0
+
+    supervisor_model_display = resolve_model_display(
+        supervisor.get("runtime", ""), supervisor.get("model", ""))
 
     return {
         "project": {
@@ -492,10 +553,12 @@ def build_dashboard_data():
             "total_commits": total_commits,
             "elapsed_seconds": elapsed,
             "elapsed_display": f"{elapsed // 60}m {elapsed % 60}s",
+            "total_cost": round(brain_cost + total_cost, 4),
         },
         "brain": {
             "runtime": supervisor.get("runtime", ""),
             "model": supervisor.get("model", ""),
+            "model_display": supervisor_model_display,
             "tokens": brain_tokens,
             "estimated_cost": brain_cost,
             "status": "idle" if all_done else "monitoring",
