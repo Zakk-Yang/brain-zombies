@@ -64,12 +64,22 @@ capture_signatures() {
 
 all_done() {
     local has_agents=0
-    for status_file in "${BZ_DIR}/agents"/*/STATUS.md; do
-        [[ -f "$status_file" ]] || continue
+    for agent_dir in "${BZ_DIR}/agents"/*/; do
+        [[ -d "$agent_dir" ]] || continue
+        local aid
+        aid="$(basename "$agent_dir")"
+        [[ "$aid" == "supervisor" ]] && continue
         has_agents=1
+
         local state
-        state="$(grep '^State:' "$status_file" 2>/dev/null | head -1 | sed 's/State: //')"
-        [[ "$state" == "done" ]] || return 1
+        state="$(grep '^State:' "${agent_dir}/STATUS.md" 2>/dev/null | head -1 | sed 's/State: //')"
+        # Must be done AND have brain confirmation
+        if [[ "$state" != "done" && "$state" != "ready-for-review" ]]; then
+            return 1
+        fi
+        if [[ ! -f "${agent_dir}/DECISION.md" ]]; then
+            return 1  # brain hasn't confirmed
+        fi
     done
     [[ "$has_agents" -eq 1 ]] && return 0 || return 1
 }
@@ -170,6 +180,30 @@ check_stalled() {
     return 1
 }
 
+# Check 4: zombies finished but brain hasn't confirmed
+check_pending_review() {
+    local pending=""
+    for agent_dir in "${BZ_DIR}/agents"/*/; do
+        [[ -d "$agent_dir" ]] || continue
+        local agent_id
+        agent_id="$(basename "$agent_dir")"
+        [[ "$agent_id" == "supervisor" ]] && continue
+
+        local state
+        state="$(grep '^State:' "${agent_dir}/STATUS.md" 2>/dev/null | head -1 | sed 's/State: //')"
+
+        # Zombie says done or ready-for-review but no DECISION.md from brain
+        if [[ "$state" == "done" || "$state" == "ready-for-review" ]]; then
+            if [[ ! -f "${agent_dir}/DECISION.md" ]]; then
+                pending="${pending} ${agent_id}"
+            fi
+        fi
+    done
+
+    [[ -n "$pending" ]] && echo "$pending" && return 0
+    return 1
+}
+
 # ── Brain Wake (COSTS TOKENS) ───────────────────
 
 wake_brain() {
@@ -219,6 +253,12 @@ YOUR JOB: Investigate why the zombie stalled. Write a DECISION file with specifi
 Current zombie states:${status_summary}
 
 YOUR JOB: Verify all zombies are making progress. If any need intervention, write DECISION files. If all are fine, just output: ALL CLEAR. Output: DECISION: <zombie-id> — <action> — <reason>" ;;
+        review)
+            prompt="REVIEW REQUEST: Zombies pending review —${reason}.
+
+Current zombie states:${status_summary}
+
+YOUR JOB: Review the completed zombies listed above. For each one that is done/ready-for-review, check their work is acceptable (files committed, task complete). Then write a DECISION file confirming acceptance. Output: DECISION: <zombie-id> — accept, work complete — <reason>" ;;
     esac
 
     # Read brain config
@@ -388,6 +428,15 @@ while true; do
             wake_needed=1
             wake_reason="$stalled"
             wake_mode="stall"
+        fi
+    fi
+
+    # CHECK 4: Zombies done but brain hasn't confirmed
+    if [[ "$wake_needed" -eq 0 ]]; then
+        if pending="$(check_pending_review 2>/dev/null)"; then
+            wake_needed=1
+            wake_reason="$pending"
+            wake_mode="review"
         fi
     fi
 
