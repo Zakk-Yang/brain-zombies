@@ -128,13 +128,21 @@ function render(data) {
   `;
 
   // Brain
+  const brainStatus = data.brain.status;
+  const brainPhaseClass = brainStatus === 'idle' ? 'phase-done' : 'phase-coding';
+  const brainIn = ((data.brain.input_tokens || 0) + (data.brain.cache_write || 0) + (data.brain.cache_read || 0)) / 1000;
+  const brainOut = (data.brain.output_tokens || 0) / 1000;
+  const brainTotal = brainIn + brainOut;
   document.getElementById('brain-panel').innerHTML = `
-    <h2>🧠 Brain (Supervisor)</h2>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">
+      <h2 style="margin:0">🧠 Brain (Supervisor)</h2>
+      <span class="zombie-phase ${brainPhaseClass}">${brainStatus}</span>
+    </div>
     <div class="brain-meta">
       <span><span class="label">Model:</span> ${data.brain.model_display || data.brain.model}${data.brain.thinking_mode ? ` · <span style="color:#a78bfa">⚡${data.brain.thinking_mode}</span>` : ''}</span>
-      <span><span class="label">Status:</span> ${data.brain.status}</span>
-      <span><span class="label">Tokens:</span> ${(data.brain.tokens/1000).toFixed(1)}k</span>
-      <span><span class="label">Cost:</span> $${data.brain.estimated_cost.toFixed(3)}</span>
+    </div>
+    <div class="brain-meta" style="margin-top:0.3rem">
+      <span><span class="label">Tokens:</span> ${brainTotal.toFixed(1)}k (In: ${brainIn.toFixed(1)}k Out: ${brainOut.toFixed(1)}k) · <span class="label">Cost:</span> $${data.brain.estimated_cost.toFixed(2)}</span>
     </div>
   `;
 
