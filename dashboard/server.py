@@ -221,6 +221,7 @@ def get_health(agent_id, state):
         return "crashed"
 
     # Check for CLI process
+    cli_running = False
     try:
         pane_pid = subprocess.run(
             ["tmux", "list-panes", "-t", sess, "-F", "#{pane_pid}"],
@@ -233,8 +234,23 @@ def get_health(agent_id, state):
             )
             if result.returncode != 0:
                 return "idle"
+            cli_running = True
     except Exception:
         pass
+
+    # Check if CLI is alive but tmux output is blank/unchanged = thinking
+    if cli_running:
+        try:
+            pane_output = subprocess.run(
+                ["tmux", "capture-pane", "-t", sess, "-p", "-S", "-5"],
+                capture_output=True, text=True, timeout=5
+            ).stdout.strip()
+            # If last 5 lines are empty or just the launch command, model is thinking
+            meaningful_lines = [l for l in pane_output.split("\n") if l.strip() and not l.strip().startswith("cd ") and not l.strip().startswith("claude ") and not l.strip().startswith("codex ")]
+            if len(meaningful_lines) == 0:
+                return "thinking"
+        except Exception:
+            pass
 
     # Check last commit time in worktree
     wt = BZ_DIR / "worktrees" / agent_id

@@ -54,6 +54,8 @@ main { max-width: 1200px; margin: 0 auto; padding: 1rem; }
 .health-stuck { background: #ef4444; }
 .health-crashed { background: #ef4444; animation: blink 1s infinite; }
 .health-idle { background: #6b7280; }
+.health-thinking { background: #a78bfa; animation: pulse 2s infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 @keyframes blink { 50% { opacity: 0.3; } }
 
 .zombie-meta { font-size: 0.78rem; color: #8899aa; line-height: 1.6; }
