@@ -60,7 +60,7 @@ main { max-width: 1200px; margin: 0 auto; padding: 1rem; }
 .zombie-message { font-size: 0.75rem; color: #60a5fa; margin-top: 0.4rem; font-style: italic; }
 
 /* Context bar */
-.ctx-bar { height: 4px; background: #1e2d3d; border-radius: 2px; margin: 0.4rem 0; overflow: hidden; }
+.ctx-bar { height: 4px; background: #1e2d3d; border-radius: 2px; margin: 0.4rem 0; overflow: hidden; cursor: help; }
 .ctx-fill { height: 100%; border-radius: 2px; transition: width 0.3s; }
 .ctx-fill.low { background: #22c55e; }
 .ctx-fill.mid { background: #eab308; }
@@ -146,7 +146,7 @@ function render(data) {
           <span class="label">Health:</span> ${healthDot(z.health)}<br>
           <span class="label">Commits:</span> ${z.commit_count} <span class="label">Files:</span> ${z.files}
         </div>
-        <div class="ctx-bar"><div class="ctx-fill ${ctxClass(z.context_pct)}" style="width:${Math.min(z.context_pct, 100)}%"></div></div>
+        <div class="ctx-bar" title="${(z.total_tokens).toLocaleString()} / ${(z.context_max).toLocaleString()} tokens (${z.context_pct}%)"><div class="ctx-fill ${ctxClass(z.context_pct)}" style="width:${Math.min(z.context_pct, 100)}%"></div></div>
         <div class="zombie-meta">
           <span class="label">In:</span> ${(z.input_tokens/1000).toFixed(1)}k
           <span class="label">Out:</span> ${(z.output_tokens/1000).toFixed(1)}k
