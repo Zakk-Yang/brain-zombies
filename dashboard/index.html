@@ -115,15 +115,15 @@ function render(data) {
   document.getElementById('project-name').textContent = `— ${data.project.name}`;
   document.getElementById('updated').textContent = `Last Update: ${data.updated_at}`;
 
-  // Project bar (includes cost)
+  // Project bar
+  const totalTokensK = ((data.cost.total_tokens || 0) / 1000).toFixed(0);
   document.getElementById('project-bar').innerHTML = `
     <div class="stat"><div class="stat-value">${data.project.state.toUpperCase()}</div><div class="stat-label">Status</div></div>
     <div class="stat"><div class="stat-value">${data.project.zombies_done}/${data.project.zombies_total}</div><div class="stat-label">Zombies Done</div></div>
     <div class="stat"><div class="stat-value">${data.project.total_commits}</div><div class="stat-label">Commits</div></div>
     <div class="stat"><div class="stat-value">${data.project.elapsed_display}</div><div class="stat-label">Elapsed${data.project.state === 'complete' ? ' (final)' : ''}</div></div>
-    <div class="stat"><div class="stat-value">$${data.cost.total.toFixed(3)}</div><div class="stat-label">Total Cost</div></div>
-    <div class="stat"><div class="stat-value">$${data.cost.brain.toFixed(3)}</div><div class="stat-label">Brain Cost</div></div>
-    <div class="stat"><div class="stat-value">$${data.cost.zombies.toFixed(3)}</div><div class="stat-label">Zombie Cost</div></div>
+    <div class="stat"><div class="stat-value">${totalTokensK}k</div><div class="stat-label">Total Tokens</div></div>
+    <div class="stat"><div class="stat-value">$${data.cost.total.toFixed(2)}</div><div class="stat-label">Total Cost</div></div>
   `;
 
   // Brain
@@ -155,11 +155,9 @@ function render(data) {
         </div>
         <div class="ctx-bar" title="${(z.total_tokens).toLocaleString()} / ${(z.context_max).toLocaleString()} tokens (${z.context_pct}%)"><div class="ctx-fill ${ctxClass(z.context_pct)}" style="width:${Math.min(z.context_pct, 100)}%"></div></div>
         <div class="zombie-meta">
-          <span class="label">In:</span> ${(z.input_tokens/1000).toFixed(1)}k
+          <span class="label">In:</span> ${((z.input_tokens + (z.cache_write || 0) + (z.cache_read || 0))/1000).toFixed(1)}k
           <span class="label">Out:</span> ${(z.output_tokens/1000).toFixed(1)}k
-          ${z.cache_read ? `<span class="label">Cache:</span> ${(z.cache_read/1000).toFixed(1)}k` : ''}
-          <span class="label">Total:</span> ${(z.total_tokens/1000).toFixed(1)}k (${z.context_pct}%)
-          · <span class="label">Cost:</span> $${z.estimated_cost.toFixed(3)}
+          · <span class="label">Cost:</span> $${z.estimated_cost.toFixed(2)}
         </div>
         <div class="zombie-summary">${z.summary}</div>
         ${z.next_step ? `<div class="zombie-meta"><span class="label">Next:</span> ${z.next_step}</div>` : ''}

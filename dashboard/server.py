@@ -620,6 +620,7 @@ def build_dashboard_data():
             "brain": brain_cost,
             "zombies": total_cost,
             "total": round(brain_cost + total_cost, 4),
+            "total_tokens": total_tokens + brain_tokens,
         },
         "messages": get_message_log(),
         "updated_at": datetime.now().strftime("%H:%M:%S"),
