@@ -625,10 +625,11 @@ def build_dashboard_data():
             "latest_message": status.get("summary", ""),
         }
 
-        # Detect iterator role — check for iterate ledger
-        iterate_ledger = _load_iterate_ledger(aid)
-        if iterate_ledger or ac.get("role") == "iterator":
-            zombie_entry["iterate"] = iterate_ledger
+        # Detect iterator role — only show iterate card for explicit iterators
+        if ac.get("role") == "iterator":
+            iterate_ledger = _load_iterate_ledger(aid)
+            if iterate_ledger:
+                zombie_entry["iterate"] = iterate_ledger
 
         zombies.append(zombie_entry)
 
@@ -737,9 +738,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
 
 def _load_iterate_ledger(agent_id: str) -> dict | None:
-    """Load iterate ledger for an agent, if it exists."""
-    # Check in project root and worktree
-    for base in [PROJECT_ROOT, PROJECT_ROOT / ".bz" / "worktrees" / agent_id]:
+    """Load iterate ledger for an iterator agent.
+
+    Checks agent-specific worktree first, then project root.
+    Only called for agents with role=iterator.
+    """
+    for base in [PROJECT_ROOT / ".bz" / "worktrees" / agent_id, PROJECT_ROOT]:
         ledger_path = base / ".bz" / "iterate" / "ledger.json"
         if ledger_path.exists():
             try:
