@@ -46,6 +46,7 @@ main { max-width: 1200px; margin: 0 auto; padding: 1rem; }
 .phase-review { background: #3d2e00; color: #eab308; }
 .phase-ready-for-review { background: #2e1a3d; color: #c084fc; }
 .phase-done { background: #0f2a0f; color: #22c55e; }
+.phase-finished { background: #0a1f0a; color: #16a34a; font-weight: bold; }
 .phase-iterating { background: #2e1a00; color: #f59e0b; }
 .phase-unknown { background: #1e1e1e; color: #666; }
 
@@ -66,13 +67,7 @@ main { max-width: 1200px; margin: 0 auto; padding: 1rem; }
 .iterate-bar-fill { height: 100%; background: #f59e0b; border-radius: 3px; transition: width 0.3s; }
 .iterate-champion { background: #1a1500; border: 1px solid #f59e0b33; border-radius: 6px; padding: 0.4rem 0.6rem; margin: 0.4rem 0; font-size: 0.8rem; }
 
-.health-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
-.health-healthy { background: #22c55e; }
-.health-slow { background: #eab308; }
-.health-stuck { background: #ef4444; }
-.health-crashed { background: #ef4444; animation: blink 1s infinite; }
-.health-idle { background: #6b7280; }
-.health-thinking { background: #a78bfa; animation: pulse 2s infinite; }
+.phase-crashed { background: #3d1010; color: #ef4444; animation: blink 1s infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 @keyframes blink { 50% { opacity: 0.3; } }
 
@@ -198,7 +193,6 @@ function renderIteratorCard(z) {
   `;
 }
 function phaseClass(p) { return `phase-${p || 'unknown'}`; }
-function healthDot(h) { return `<span class="health-dot health-${h}"></span>${h}`; }
 function ctxClass(pct) { return pct > 70 ? 'high' : pct > 40 ? 'mid' : 'low'; }
 function sourceClass(s) {
   if (s.includes('BRAIN') || s.includes('nerve')) return 'brain';
@@ -233,7 +227,7 @@ function render(data) {
       <span class="zombie-phase ${brainPhaseClass}">${brainStatus}</span>
     </div>
     <div class="brain-meta">
-      <span><span class="label">Model:</span> ${data.brain.model_display || data.brain.model}${data.brain.thinking_mode ? ` · <span style="color:#a78bfa">⚡${data.brain.thinking_mode}</span>` : ''}</span>
+      <span><span class="label">Model:</span> ${data.brain.model_display || data.brain.model}${data.brain.thinking_mode ? ` · <span style="color:#a78bfa">⚡${data.brain.thinking_mode}</span>` : ' · <span style="color:#666">No Thinking</span>'}</span>
     </div>
     <div class="brain-meta" style="margin-top:0.3rem">
       <span><span class="label">Tokens:</span> ${brainTotal.toFixed(1)}k (In: ${brainIn.toFixed(1)}k Out: ${brainOut.toFixed(1)}k) · <span class="label">Cost:</span> $${data.brain.estimated_cost.toFixed(2)}</span>
@@ -248,7 +242,7 @@ function render(data) {
       html += renderIteratorCard(z);
     } else {
       // Regular zombie card
-      const cardClass = z.health === 'crashed' ? 'crashed' : z.health === 'stuck' ? 'stuck' : z.phase === 'blocked' ? 'blocked' : z.phase === 'done' ? 'done' : '';
+      const cardClass = z.phase === 'crashed' ? 'crashed' : z.phase === 'blocked' ? 'blocked' : (z.phase === 'done' || z.phase === 'finished') ? 'done' : '';
       html += `
         <div class="zombie-card ${cardClass}">
           <div class="zombie-header">
@@ -256,8 +250,7 @@ function render(data) {
             <span class="zombie-phase ${phaseClass(z.phase)}">${z.phase}</span>
           </div>
           <div class="zombie-meta">
-            <span class="label">Model:</span> ${z.model_display || z.model}${z.thinking_mode ? ` · <span style="color:#a78bfa">⚡${z.thinking_mode}</span>` : ''}<br>
-            <span class="label">Health:</span> ${healthDot(z.health)}
+            <span class="label">Model:</span> ${z.model_display || z.model}${z.thinking_mode ? ` · <span style="color:#a78bfa">⚡${z.thinking_mode}</span>` : ' · <span style="color:#666">No Thinking</span>'}
             ${z.last_updated ? ` · <span class="label">Updated:</span> ${z.last_updated}` : ''}<br>
             <span class="label">Commits:</span> ${z.commit_count} · <span class="label">Files:</span> ${z.file_count} (${z.files})
           </div>

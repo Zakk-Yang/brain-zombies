@@ -172,9 +172,11 @@ def read_status(agent_id):
 def get_phase(state, agent_id=None):
     """Map state to standardized phase.
 
-    Lifecycle: starting → planning → blocked → coding → ready-for-review → done
+    Lifecycle: starting → planning → blocked → coding → ready-for-review → done → finished
     - ready-for-review: zombie says done, brain hasn't confirmed
-    - done: brain confirmed via DECISION.md
+    - done: zombie self-reported done (no brain confirmation yet)
+    - finished: brain confirmed via DECISION.md — terminal state
+    - crashed: tmux session dead (overrides any other state)
     """
     mapping = {
         "starting": "starting",
@@ -189,100 +191,34 @@ def get_phase(state, agent_id=None):
         "ready-for-review": "ready-for-review",
     }
 
-    if state in ("done", "ready-for-review") and agent_id:
+    if state in ("done", "ready-for-review", "finished") and agent_id:
         # Check if brain confirmed via DECISION.md
         decision_file = BZ_DIR / "agents" / agent_id / "DECISION.md"
         if decision_file.exists():
             content = decision_file.read_text().lower()
             if any(w in content for w in ["accept", "complete", "proceed", "unblock", "done"]):
-                return "done"
+                return "finished"
         # No brain confirmation — zombie self-reported done
-        return "ready-for-review"
+        return "ready-for-review" if state == "ready-for-review" else "done"
     elif state == "done":
         return "done"
+    elif state == "finished":
+        return "finished"
+
+    # Check tmux alive — if session dead, agent crashed
+    if agent_id and state not in ("done", "finished"):
+        config = read_yaml()
+        project_name = config.get("project", {}).get("name", "unknown")
+        sess = f"bz-{project_name}-{agent_id}"
+        try:
+            subprocess.run(["tmux", "has-session", "-t", sess],
+                           capture_output=True, timeout=5, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return "crashed"
 
     return mapping.get(state, state or "unknown")
 
 
-def get_health(agent_id, state):
-    """Determine health gate from tmux + git state."""
-    config = read_yaml()
-    project_name = config.get("project", {}).get("name", "unknown")
-    sess = f"bz-{project_name}-{agent_id}"
-
-    if state == "done":
-        return "healthy"
-
-    # Check tmux alive
-    try:
-        subprocess.run(["tmux", "has-session", "-t", sess],
-                       capture_output=True, timeout=5, check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return "crashed"
-
-    # Check for CLI process
-    cli_running = False
-    try:
-        pane_pid = subprocess.run(
-            ["tmux", "list-panes", "-t", sess, "-F", "#{pane_pid}"],
-            capture_output=True, text=True, timeout=5
-        ).stdout.strip().split("\n")[0]
-        if pane_pid:
-            result = subprocess.run(
-                ["pgrep", "-P", pane_pid, "-f", "claude|codex|aider"],
-                capture_output=True, timeout=5
-            )
-            if result.returncode != 0:
-                return "idle"
-            cli_running = True
-    except Exception:
-        pass
-
-    # Check if CLI is alive but tmux output is blank/unchanged = thinking
-    if cli_running:
-        try:
-            pane_output = subprocess.run(
-                ["tmux", "capture-pane", "-t", sess, "-p", "-S", "-5"],
-                capture_output=True, text=True, timeout=5
-            ).stdout.strip()
-            # If last 5 lines are empty or just the launch command, model is thinking
-            meaningful_lines = [
-                l for l in pane_output.split("\n")
-                if l.strip()
-                and "$ cd " not in l
-                and "$ claude " not in l
-                and "$ codex " not in l
-                and "PROMPT.txt" not in l
-                and "RESTART_PROMPT" not in l
-                and "dangerously-skip" not in l
-                and not l.strip().startswith("cd ")
-                and not l.strip().startswith("claude ")
-                and not l.strip().startswith("codex ")
-            ]
-            if len(meaningful_lines) == 0:
-                return "thinking"
-        except Exception:
-            pass
-
-    # Check last commit time in worktree
-    wt = BZ_DIR / "worktrees" / agent_id
-    if wt.exists():
-        try:
-            result = subprocess.run(
-                ["git", "-C", str(wt), "log", "-1", "--format=%ct"],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.stdout.strip():
-                last_commit = int(result.stdout.strip())
-                elapsed = time.time() - last_commit
-                if elapsed > 600:
-                    return "stuck"
-                elif elapsed > 300:
-                    return "slow"
-        except Exception:
-            pass
-
-    return "healthy"
 
 
 def get_token_usage(agent_id):
@@ -581,7 +517,6 @@ def build_dashboard_data():
         status = read_status(aid)
         state = status.get("state", "unknown")
         phase = get_phase(state, aid)
-        health = get_health(aid, state)
         usage = get_token_usage(aid)
         cost = estimate_cost_from_usage(usage, model)
         commits = get_commits(aid)
@@ -604,7 +539,6 @@ def build_dashboard_data():
             "model_display": model_display,
             "thinking_mode": thinking_mode,
             "phase": phase,
-            "health": health,
             "state": state,
             "summary": status.get("summary", "No summary"),
             "files": file_list,
@@ -638,13 +572,14 @@ def build_dashboard_data():
     brain_tokens = brain_usage["total"]
     brain_cost = estimate_cost_from_usage(brain_usage, supervisor.get("model", ""))
 
-    # All done?
-    all_done = all(z["phase"] == "done" for z in zombies) if zombies else False
-    zombies_done = sum(1 for z in zombies if z["phase"] == "done")
+    # All finished? (brain confirmed, not just zombie self-reported done)
+    all_finished = all(z["phase"] == "finished" for z in zombies) if zombies else False
+    zombies_done = sum(1 for z in zombies if z["phase"] in ("done", "finished"))
+    zombies_finished = sum(1 for z in zombies if z["phase"] == "finished")
 
-    # Elapsed: stop counting when all done (use last commit time as end)
+    # Elapsed: stop counting when all FINISHED (brain confirmed)
     end_time = time.time()
-    if all_done:
+    if all_finished:
         try:
             result = subprocess.run(
                 ["git", "-C", str(PROJECT_ROOT), "log", "--all", "--format=%ct", "-1"],
@@ -663,7 +598,7 @@ def build_dashboard_data():
     return {
         "project": {
             "name": project.get("name", "unknown"),
-            "state": "complete" if all_done else "active",
+            "state": "complete" if all_finished else "active",
             "zombies_total": len(zombies),
             "zombies_done": zombies_done,
             "total_commits": total_commits,
