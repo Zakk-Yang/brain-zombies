@@ -425,12 +425,16 @@ START NOW."
         if [[ "$cli_cmd" == "claude" ]]; then
             cmd="cd ${abs_work_dir} && claude --dangerously-skip-permissions"
             [[ -n "$model" ]] && cmd="$cmd --model $model"
-            # Claude Code CLI accepts: enabled, adaptive, disabled (not high/medium/xhigh)
+            # Claude Code CLI uses --effort (low/medium/high/max), not --thinking
             if [[ -n "$thinking" && "$thinking" != "None" && "$thinking" != "off" ]]; then
                 if [[ "$thinking" == "disabled" || "$thinking" == "off" ]]; then
-                    cmd="$cmd --thinking disabled"
-                else
-                    cmd="$cmd --thinking enabled"
+                    cmd="$cmd --effort low"
+                elif [[ "$thinking" == "max" || "$thinking" == "xhigh" ]]; then
+                    cmd="$cmd --effort max"
+                elif [[ "$thinking" == "high" || "$thinking" == "enabled" ]]; then
+                    cmd="$cmd --effort high"
+                elif [[ "$thinking" == "medium" ]]; then
+                    cmd="$cmd --effort medium"
                 fi
             fi
             cmd="$cmd -p \"\$(cat ${abs_prompt_file})\""
