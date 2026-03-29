@@ -411,9 +411,15 @@ START NOW."
             cp "$prompt_file" "${work_dir}/${BZ_DIR}/agents/${agent_id}/PROMPT.txt" 2>/dev/null || true
         fi
 
-        # Spawn tmux session
+        # Spawn tmux session (kill existing + child processes first)
         local sess
         sess="$(session_name "$agent_id")"
+        for pane_pid in $(tmux list-panes -t "$sess" -F '#{pane_pid}' 2>/dev/null); do
+            pkill -TERM -P "$pane_pid" 2>/dev/null || true
+            for child in $(pgrep -P "$pane_pid" 2>/dev/null); do
+                pkill -TERM -P "$child" 2>/dev/null || true
+            done
+        done
         tmux kill-session -t "$sess" 2>/dev/null || true
 
         local abs_work_dir
@@ -629,10 +635,28 @@ cmd_teardown() {
         ok "Reconcile loop stopped"
     fi
 
-    # Kill tmux sessions
+    # Kill tmux sessions AND their child process trees
     tmux list-sessions 2>/dev/null | grep "bz-${project}" | cut -d: -f1 | while read -r sess; do
+        # Get all PIDs in the tmux session's panes
+        for pane_pid in $(tmux list-panes -t "$sess" -F '#{pane_pid}' 2>/dev/null); do
+            # Kill entire process tree rooted at the pane shell
+            # This catches python experiments, training jobs, etc.
+            pkill -TERM -P "$pane_pid" 2>/dev/null || true
+            # Also kill descendants of descendants (grandchildren)
+            for child in $(pgrep -P "$pane_pid" 2>/dev/null); do
+                pkill -TERM -P "$child" 2>/dev/null || true
+            done
+        done
+        sleep 1
+        # Force-kill any survivors
+        for pane_pid in $(tmux list-panes -t "$sess" -F '#{pane_pid}' 2>/dev/null); do
+            pkill -KILL -P "$pane_pid" 2>/dev/null || true
+            for child in $(pgrep -P "$pane_pid" 2>/dev/null); do
+                pkill -KILL -P "$child" 2>/dev/null || true
+            done
+        done
         tmux kill-session -t "$sess" 2>/dev/null || true
-        ok "Killed session: $sess"
+        ok "Killed session + children: $sess"
     done
 
     ok "Teardown complete"
@@ -745,6 +769,12 @@ cmd_feedback() {
     if [[ "$cli_running" -eq 0 ]]; then
         # Zombie finished — need to restart it with feedback
         warn "Zombie '${target}' CLI not running. Restarting with feedback..."
+        for pane_pid in $(tmux list-panes -t "$sess" -F '#{pane_pid}' 2>/dev/null); do
+            pkill -TERM -P "$pane_pid" 2>/dev/null || true
+            for child in $(pgrep -P "$pane_pid" 2>/dev/null); do
+                pkill -TERM -P "$child" 2>/dev/null || true
+            done
+        done
         tmux kill-session -t "$sess" 2>/dev/null || true
 
         local cli_cmd model
