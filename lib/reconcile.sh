@@ -472,8 +472,8 @@ print(d.get('supervisor',{}).get('thinking',''))
     echo "[brain] $(date '+%H:%M:%S') RESPONSE: ${brain_output}" | head -20
 
     # Parse decisions and relay to zombies
-    # Strip markdown bold/italic before parsing
-    echo "$brain_output" | sed 's/\*\*//g; s/\*//g; s/__//g; s/`//g' | grep "^DECISION:" | while IFS= read -r decision_line; do
+    # Strip markdown (bold, italic, headings, code) then find DECISION lines
+    echo "$brain_output" | sed 's/\*\*//g; s/\*//g; s/__//g; s/`//g; s/^#\+ *//' | grep "^DECISION:" | while IFS= read -r decision_line; do
         local target action
         target="$(echo "$decision_line" | sed 's/DECISION: //' | cut -d'—' -f1 | xargs)"
         action="$(echo "$decision_line" | cut -d'—' -f2- | xargs)"
