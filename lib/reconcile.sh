@@ -357,13 +357,17 @@ print(d.get('supervisor',{}).get('thinking',''))
     local brain_prompt_file="${BZ_DIR}/logs/brain-prompt-$(date +%s).txt"
     echo "$prompt" > "$brain_prompt_file"
 
-    # Claude Code CLI accepts: enabled, adaptive, disabled (not high/medium/xhigh)
+    # Claude Code CLI uses --effort (low/medium/high/max), not --thinking
     local thinking_flag=""
     if [[ -n "$brain_thinking" && "$brain_thinking" != "None" && "$brain_thinking" != "" && "$brain_thinking" != "off" ]]; then
         if [[ "$brain_thinking" == "disabled" || "$brain_thinking" == "off" ]]; then
-            thinking_flag="--thinking disabled"
-        else
-            thinking_flag="--thinking enabled"
+            thinking_flag="--effort low"
+        elif [[ "$brain_thinking" == "max" || "$brain_thinking" == "xhigh" ]]; then
+            thinking_flag="--effort max"
+        elif [[ "$brain_thinking" == "high" || "$brain_thinking" == "enabled" ]]; then
+            thinking_flag="--effort high"
+        elif [[ "$brain_thinking" == "medium" ]]; then
+            thinking_flag="--effort medium"
         fi
     fi
 
@@ -516,12 +520,11 @@ while true; do
     fi
 
     # CHECK 4: Zombies done but brain hasn't confirmed
-    if [[ "$wake_needed" -eq 0 ]]; then
-        if pending="$(check_pending_review 2>/dev/null)"; then
-            wake_needed=1
-            wake_reason="$pending"
-            wake_mode="review"
-        fi
+    # ALWAYS check — override reactive wake with review wake if pending
+    if pending="$(check_pending_review 2>/dev/null)"; then
+        wake_needed=1
+        wake_reason="$pending"
+        wake_mode="review"  # review mode overrides reactive — tells brain to verify + write DECISION
     fi
 
     # FIRE if any check triggered
