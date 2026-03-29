@@ -617,7 +617,7 @@ def build_dashboard_data():
             "cache_write": brain_usage.get("cache_write", 0),
             "tokens": brain_usage.get("total_billed", brain_tokens),
             "estimated_cost": brain_cost,
-            "status": "idle" if all_done else "monitoring",
+            "status": "idle" if all(z.get("state") == "done" for z in zombies) else "monitoring",
         },
         "zombies": zombies,
         "cost": {
@@ -756,7 +756,7 @@ def _handle_teardown():
 if __name__ == "__main__":
     print(f"🧠🧟 Dashboard at http://localhost:{PORT}")
     print(f"Project: {PROJECT_ROOT}")
-    server = http.server.HTTPServer(("127.0.0.1", PORT), DashboardHandler)
+    server = http.server.HTTPServer(("0.0.0.0", PORT), DashboardHandler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

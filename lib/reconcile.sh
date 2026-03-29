@@ -121,6 +121,60 @@ check_state_change() {
     return 0
 }
 
+# Check 1.5: hallucination — agent claims done/ready but has zero git changes
+check_hallucination() {
+    local frauds=""
+    for agent_dir in "${BZ_DIR}/agents"/*/; do
+        [[ -d "$agent_dir" ]] || continue
+        local agent_id
+        agent_id="$(basename "$agent_dir")"
+        [[ "$agent_id" == "supervisor" ]] && continue
+
+        local state
+        state="$(grep '^State:' "${agent_dir}/STATUS.md" 2>/dev/null | head -1 | sed 's/State: //')"
+
+        # Only check agents claiming completion
+        [[ "$state" != "done" && "$state" != "ready-for-review" ]] && continue
+
+        # Already verified by brain (has DECISION.md)
+        [[ -f "${agent_dir}/DECISION.md" ]] && continue
+
+        # Check git diff in worktree — should have commits beyond main
+        local wt="${BZ_DIR}/worktrees/${agent_id}"
+        if [[ -d "$wt" ]] && ( [[ -d "$wt/.git" ]] || [[ -f "$wt/.git" ]] ); then
+            local main_head
+            main_head="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo "")"
+            local wt_head
+            wt_head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo "")"
+
+            if [[ -n "$main_head" && "$main_head" == "$wt_head" ]]; then
+                # Zero commits beyond main — agent is lying
+                local files_touched
+                files_touched="$(grep '^Files touched:' "${agent_dir}/STATUS.md" 2>/dev/null | head -1 | sed 's/Files touched: //')"
+                if [[ "$files_touched" != "none" && -n "$files_touched" ]]; then
+                    # Claims files but has no commits — hallucination
+                    frauds="${frauds} ${agent_id}"
+                    log "HALLUCINATION DETECTED: ${agent_id} claims '${state}' with files '${files_touched}' but has zero git changes"
+
+                    # Auto-reject: reset status and restart
+                    cat > "${agent_dir}/STATUS.md" << FRAUD_EOF
+# STATUS.md
+State: executing
+Summary: RESTARTED — previous completion was rejected (zero git changes detected). You must actually write code, run experiments, and git commit your work.
+Files touched: none
+Next step: Re-read BRIEF.md and do the actual work. Commit files as you go.
+Blocker: none
+Last updated: $(date '+%Y-%m-%d %H:%M')
+FRAUD_EOF
+                fi
+            fi
+        fi
+    done
+
+    [[ -n "$frauds" ]] && echo "$frauds" && return 0
+    return 1
+}
+
 # Check 2: tmux session died
 check_zombie_alive() {
     local dead=""
@@ -453,6 +507,12 @@ while true; do
             wake_reason="$stalled"
             wake_mode="stall"
         fi
+    fi
+
+    # CHECK 3.5: Hallucination — agent claims done but has zero git changes
+    if frauds="$(check_hallucination 2>/dev/null)"; then
+        log "Hallucination auto-rejected:${frauds}"
+        # Don't wake brain — we already reset the agent
     fi
 
     # CHECK 4: Zombies done but brain hasn't confirmed
