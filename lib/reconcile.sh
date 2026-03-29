@@ -403,8 +403,14 @@ YOUR JOB: Review the work above for each pending zombie. Check:
 1. Did commits actually land? (check git commits section)
 2. Do the results meet the success criteria in PROJECT_BRIEF.md?
 3. Are the reported metrics plausible (not hallucinated)?
-For each zombie, write a DECISION — accept/reject/redirect with specific reasoning.
-Output format: DECISION: <zombie-id> — <accept|reject|redirect> — <reason>" ;;
+
+You MUST output one DECISION line per pending zombie. No exceptions. No skipping.
+Use EXACTLY this format (plain text, no markdown, no bold):
+DECISION: zombie-id — accept — reason
+DECISION: zombie-id — reject — reason
+DECISION: zombie-id — redirect — new instructions
+
+Pending zombies that MUST each get a DECISION line: ${reason}" ;;
     esac
 
     # Read brain config
@@ -466,7 +472,8 @@ print(d.get('supervisor',{}).get('thinking',''))
     echo "[brain] $(date '+%H:%M:%S') RESPONSE: ${brain_output}" | head -20
 
     # Parse decisions and relay to zombies
-    echo "$brain_output" | grep "^DECISION:" | while IFS= read -r decision_line; do
+    # Strip markdown bold/italic before parsing
+    echo "$brain_output" | sed 's/\*\*//g; s/\*//g; s/__//g; s/`//g' | grep "^DECISION:" | while IFS= read -r decision_line; do
         local target action
         target="$(echo "$decision_line" | sed 's/DECISION: //' | cut -d'—' -f1 | xargs)"
         action="$(echo "$decision_line" | cut -d'—' -f2- | xargs)"
