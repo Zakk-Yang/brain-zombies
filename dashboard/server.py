@@ -445,11 +445,19 @@ def get_message_log():
                     "type": "feedback",
                 })
 
-    # From git log (all branches)
+    # From git log — only current project's agent branches
     try:
+        config = read_yaml()
+        agent_ids = {a.get("id", "") for a in config.get("agents", [])}
+        # Build list of branches to show (bz/<agent-id> for current agents)
+        branch_args = []
+        for aid in agent_ids:
+            branch_args.extend(["--glob", f"refs/heads/bz/{aid}"])
+        branch_args.append("HEAD")  # also include master/main
+
         result = subprocess.run(
-            ["git", "-C", str(PROJECT_ROOT), "log", "--all",
-             "--format=%ct %s", ],
+            ["git", "-C", str(PROJECT_ROOT), "log",
+             "--format=%ct %s"] + branch_args,
             capture_output=True, text=True, timeout=5
         )
         for line in result.stdout.strip().split("\n"):
@@ -460,7 +468,7 @@ def get_message_log():
                 ts = datetime.fromtimestamp(int(parts[0])).strftime("%H:%M:%S")
                 msg = parts[1]
                 cm = re.match(r'\[(\w+[-\w]*)\]\s*(.*)', msg)
-                if cm:
+                if cm and cm.group(1) in agent_ids:
                     messages.append({
                         "time": ts,
                         "from": f"🧟 {cm.group(1)}",
@@ -482,12 +490,17 @@ def build_dashboard_data():
     supervisor = config.get("supervisor", {})
     agents_config = config.get("agents", [])
 
-    # Project info
+    # Project info — scoped to current agents only
+    agent_ids = {a.get("id", "") for a in agents_config}
+    branch_args = []
+    for aid in agent_ids:
+        branch_args.extend(["--glob", f"refs/heads/bz/{aid}"])
+
     start_time = None
     try:
         result = subprocess.run(
-            ["git", "-C", str(PROJECT_ROOT), "log", "--all", "--reverse",
-             "--format=%ct", "-1"],
+            ["git", "-C", str(PROJECT_ROOT), "log", "--reverse",
+             "--format=%ct", "-1"] + branch_args,
             capture_output=True, text=True, timeout=5
         )
         if result.stdout.strip():
@@ -498,7 +511,7 @@ def build_dashboard_data():
     total_commits = 0
     try:
         result = subprocess.run(
-            ["git", "-C", str(PROJECT_ROOT), "log", "--all", "--oneline"],
+            ["git", "-C", str(PROJECT_ROOT), "log", "--oneline"] + branch_args,
             capture_output=True, text=True, timeout=5
         )
         total_commits = len([l for l in result.stdout.strip().split("\n") if l])
