@@ -265,6 +265,71 @@ check_pending_review() {
     return 1
 }
 
+# Gather an agent's actual work for brain review
+gather_agent_work() {
+    local agent_id="$1"
+    local work=""
+    local wt="${BZ_DIR}/worktrees/${agent_id}"
+    local agent_dir="${BZ_DIR}/agents/${agent_id}"
+
+    # Full STATUS.md
+    if [[ -f "${agent_dir}/STATUS.md" ]]; then
+        work="${work}
+--- STATUS.md ---
+$(cat "${agent_dir}/STATUS.md")"
+    fi
+
+    # Git log (commits by this agent)
+    if [[ -d "$wt/.git" ]] || [[ -f "$wt/.git" ]]; then
+        local branch_commits
+        branch_commits="$(git -C "$wt" log --oneline "master..HEAD" 2>/dev/null | head -20)"
+        if [[ -n "$branch_commits" ]]; then
+            work="${work}
+
+--- Git commits (branch vs master) ---
+${branch_commits}"
+        fi
+
+        # Git diff stat
+        local diff_stat
+        diff_stat="$(git -C "$wt" diff --stat master 2>/dev/null | tail -5)"
+        if [[ -n "$diff_stat" ]]; then
+            work="${work}
+
+--- Files changed ---
+${diff_stat}"
+        fi
+    fi
+
+    # Output files: reports, results (truncated to avoid prompt explosion)
+    for report in "${wt}/outputs/research/"*.md "${wt}/outputs/research/"*.json; do
+        [[ -f "$report" ]] || continue
+        local fname
+        fname="$(basename "$report")"
+        local content
+        content="$(head -80 "$report")"
+        work="${work}
+
+--- ${fname} (first 80 lines) ---
+${content}"
+    done
+
+    # Check for experiment results (metrics output)
+    for metrics_file in "${wt}/outputs/experiments/"*/metrics.json; do
+        [[ -f "$metrics_file" ]] || continue
+        local exp_name
+        exp_name="$(basename "$(dirname "$metrics_file")")"
+        local content
+        content="$(head -30 "$metrics_file")"
+        work="${work}
+
+--- Experiment: ${exp_name} (metrics) ---
+${content}"
+    done
+
+    echo "$work"
+}
+
 # ── Brain Wake (COSTS TOKENS) ───────────────────
 
 wake_brain() {
@@ -315,11 +380,31 @@ Current zombie states:${status_summary}
 
 YOUR JOB: Verify all zombies are making progress. If any need intervention, write DECISION files. If all are fine, just output: ALL CLEAR. Output: DECISION: <zombie-id> — <action> — <reason>" ;;
         review)
+            # Gather actual work from each pending agent
+            local review_details=""
+            for rid in ${reason}; do
+                local agent_work
+                agent_work="$(gather_agent_work "$rid" 2>/dev/null)"
+                if [[ -n "$agent_work" ]]; then
+                    review_details="${review_details}
+
+========== AGENT: ${rid} ==========${agent_work}
+"
+                fi
+            done
+
             prompt="REVIEW REQUEST: Zombies pending review —${reason}.
 
 Current zombie states:${status_summary}
 
-YOUR JOB: Review the completed zombies listed above. For each one that is done/ready-for-review, check their work is acceptable (files committed, task complete). Then write a DECISION file confirming acceptance. Output: DECISION: <zombie-id> — accept, work complete — <reason>" ;;
+=== DETAILED WORK FOR REVIEW ===${review_details}
+
+YOUR JOB: Review the work above for each pending zombie. Check:
+1. Did commits actually land? (check git commits section)
+2. Do the results meet the success criteria in PROJECT_BRIEF.md?
+3. Are the reported metrics plausible (not hallucinated)?
+For each zombie, write a DECISION — accept/reject/redirect with specific reasoning.
+Output format: DECISION: <zombie-id> — <accept|reject|redirect> — <reason>" ;;
     esac
 
     # Read brain config
