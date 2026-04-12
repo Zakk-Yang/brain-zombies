@@ -48,6 +48,7 @@ main { max-width: 1200px; margin: 0 auto; padding: 1rem; }
 .phase-done { background: #0f2a0f; color: #22c55e; }
 .phase-finished { background: #0a1f0a; color: #16a34a; font-weight: bold; }
 .phase-iterating { background: #2e1a00; color: #f59e0b; }
+.phase-attention { background: #3d1010; color: #fca5a5; }
 .phase-unknown { background: #1e1e1e; color: #666; }
 
 /* Iterator card */
@@ -217,7 +218,7 @@ function render(data) {
 
   // Brain
   const brainStatus = data.brain.status;
-  const brainPhaseClass = brainStatus === 'idle' ? 'phase-done' : 'phase-coding';
+  const brainPhaseClass = brainStatus === 'idle' ? 'phase-done' : (brainStatus === 'attention' ? 'phase-attention' : 'phase-coding');
   const brainIn = ((data.brain.input_tokens || 0) + (data.brain.cache_write || 0) + (data.brain.cache_read || 0)) / 1000;
   const brainOut = (data.brain.output_tokens || 0) / 1000;
   const brainTotal = brainIn + brainOut;
@@ -230,8 +231,9 @@ function render(data) {
       <span><span class="label">Model:</span> ${data.brain.model_display || data.brain.model}${data.brain.thinking_mode ? ` · <span style="color:#a78bfa">⚡${data.brain.thinking_mode}</span>` : ' · <span style="color:#666">No Thinking</span>'}</span>
     </div>
     <div class="brain-meta" style="margin-top:0.3rem">
-      <span><span class="label">Tokens:</span> ${brainTotal.toFixed(1)}k (In: ${brainIn.toFixed(1)}k Out: ${brainOut.toFixed(1)}k) · <span class="label">Cost:</span> $${data.brain.estimated_cost.toFixed(2)}</span>
+      <span><span class="label">Tokens:</span> ${brainTotal.toFixed(1)}k (In: ${brainIn.toFixed(1)}k Out: ${brainOut.toFixed(1)}k) · <span class="label">Cost:</span> $${data.brain.estimated_cost.toFixed(2)} · <span class="label">Active Requests:</span> ${data.brain.active_requests || 0}</span>
     </div>
+    ${data.brain.memory_excerpt ? `<div class="zombie-summary" style="margin-top:0.6rem"><strong>Brain Memory:</strong> ${data.brain.memory_excerpt}</div>` : ''}
   `;
 
   // Zombies
@@ -252,7 +254,8 @@ function render(data) {
           <div class="zombie-meta">
             <span class="label">Model:</span> ${z.model_display || z.model}${z.thinking_mode ? ` · <span style="color:#a78bfa">⚡${z.thinking_mode}</span>` : ' · <span style="color:#666">No Thinking</span>'}
             ${z.last_updated ? ` · <span class="label">Updated:</span> ${z.last_updated}` : ''}<br>
-            <span class="label">Commits:</span> ${z.commit_count} · <span class="label">Files:</span> ${z.file_count} (${z.files})
+            <span class="label">Action:</span> ${z.action || '—'} · <span class="label">Needs brain:</span> ${z.needs_brain || 'no'}<br>
+            <span class="label">Depends on:</span> ${z.depends_on || 'none'} · <span class="label">Commits:</span> ${z.commit_count} · <span class="label">Files:</span> ${z.file_count} (${z.files})
           </div>
           <div class="ctx-bar" title="${(z.total_tokens).toLocaleString()} / ${(z.context_max).toLocaleString()} tokens (${z.context_pct}%)"><div class="ctx-fill ${ctxClass(z.context_pct)}" style="width:${Math.min(z.context_pct, 100)}%"></div></div>
           <div class="zombie-meta">
@@ -262,6 +265,8 @@ function render(data) {
           </div>
           <div class="zombie-summary">${z.summary}</div>
           ${z.next_step ? `<div class="zombie-meta"><span class="label">Next:</span> ${z.next_step}</div>` : ''}
+          ${z.blocker && z.blocker !== 'none' ? `<div class="zombie-meta"><span class="label">Blocker:</span> ${z.blocker}</div>` : ''}
+          ${z.memory_excerpt ? `<div class="zombie-message">Memory: ${z.memory_excerpt}</div>` : ''}
         </div>
       `;
     }

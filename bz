@@ -105,6 +105,127 @@ worktree_path() {
     echo "${BZ_DIR}/worktrees/$1"
 }
 
+control_plane() {
+    python3 "${SCRIPT_DIR}/lib/control_plane.py" --project-root "$(pwd -P)" "$@"
+}
+
+install_bzctl_wrapper() {
+    local wrapper_dir="$1"
+    local project_root_abs="$2"
+    local control_plane_py
+    control_plane_py="$(realpath "${SCRIPT_DIR}/lib/control_plane.py")"
+
+    mkdir -p "$wrapper_dir"
+    cat > "${wrapper_dir}/bzctl" << EOF
+#!/usr/bin/env bash
+set -euo pipefail
+python3 '${control_plane_py}' --project-root '${project_root_abs}' "\$@"
+EOF
+    chmod +x "${wrapper_dir}/bzctl"
+}
+
+agent_memory_relpath() {
+    echo "${BZ_DIR}/memory/agents/$1.md"
+}
+
+status_field() {
+    local status_file="$1"
+    local key="$2"
+    grep "^${key}:" "$status_file" 2>/dev/null | head -1 | sed "s/^${key}: //"
+}
+
+write_status_file() {
+    local path="$1"; shift
+    local agent_id="$1"; shift
+    local state="$1"; shift
+    local action="$1"; shift
+    local summary="$1"; shift
+    local files_touched="$1"; shift
+    local depends_on="$1"; shift
+    local needs_brain="$1"; shift
+    local next_step="$1"; shift
+    local blocker="$1"; shift
+    local memory_path="${1:-$(agent_memory_relpath "$agent_id")}"
+
+    cat > "$path" <<EOF
+# STATUS.md
+State: ${state}
+Action: ${action}
+Summary: ${summary}
+Files touched: ${files_touched}
+Depends on: ${depends_on}
+Needs brain: ${needs_brain}
+Next step: ${next_step}
+Blocker: ${blocker}
+Memory: ${memory_path}
+Last updated: $(date '+%Y-%m-%d %H:%M')
+EOF
+}
+
+write_agent_memory_file() {
+    local path="$1"
+    local agent_id="$2"
+
+    cat > "$path" <<EOF
+# Agent Memory: ${agent_id}
+
+## Current focus
+- Waiting to begin.
+
+## Important context
+- Keep this file concise. Capture only decisions, discoveries, blockers, and handoff notes.
+
+## Open items
+- none
+
+## Handoff for brain
+- none
+EOF
+}
+
+write_brain_memory_file() {
+    local path="$1"
+
+    cat > "$path" <<'EOF'
+# Brain Memory
+
+## Coordination notes
+- Track cross-agent dependencies, review outcomes, and recurring failure modes here.
+
+## Global blockers
+- none
+
+## Open handoffs
+- none
+EOF
+}
+
+sync_agent_protocol_to_worktree() {
+    local agent_id="$1"
+    local wt_path
+    wt_path="$(worktree_path "$agent_id")"
+    [[ -d "$wt_path" ]] || return 0
+
+    mkdir -p \
+        "${wt_path}/${BZ_DIR}/agents/${agent_id}" \
+        "${wt_path}/${BZ_DIR}/memory/agents" \
+        "${wt_path}/${BZ_DIR}/control/agents/${agent_id}" \
+        "${wt_path}/${BZ_DIR}/control/contexts" \
+        "${wt_path}/${BZ_DIR}/bin"
+
+    local rel_memory
+    rel_memory="$(agent_memory_relpath "$agent_id")"
+
+    [[ -f "${BZ_DIR}/agents/${agent_id}/BRIEF.md" ]] && cp "${BZ_DIR}/agents/${agent_id}/BRIEF.md" "${wt_path}/${BZ_DIR}/agents/${agent_id}/BRIEF.md"
+    [[ -f "${BZ_DIR}/agents/${agent_id}/STATUS.md" ]] && cp "${BZ_DIR}/agents/${agent_id}/STATUS.md" "${wt_path}/${BZ_DIR}/agents/${agent_id}/STATUS.md"
+    [[ -f "${BZ_DIR}/agents/${agent_id}/DECISION.md" ]] && cp "${BZ_DIR}/agents/${agent_id}/DECISION.md" "${wt_path}/${BZ_DIR}/agents/${agent_id}/DECISION.md"
+    [[ -f "${BZ_DIR}/memory/brain.md" ]] && cp "${BZ_DIR}/memory/brain.md" "${wt_path}/${BZ_DIR}/memory/brain.md"
+    [[ -f "${rel_memory}" ]] && cp "${rel_memory}" "${wt_path}/${rel_memory}"
+    [[ -f "${BZ_DIR}/control/contexts/${agent_id}.md" ]] && cp "${BZ_DIR}/control/contexts/${agent_id}.md" "${wt_path}/${BZ_DIR}/control/contexts/${agent_id}.md"
+    [[ -f "${BZ_DIR}/control/agents/${agent_id}/latest-action.md" ]] && cp "${BZ_DIR}/control/agents/${agent_id}/latest-action.md" "${wt_path}/${BZ_DIR}/control/agents/${agent_id}/latest-action.md"
+    [[ -f "${BZ_DIR}/bin/bzctl" ]] && cp "${BZ_DIR}/bin/bzctl" "${wt_path}/${BZ_DIR}/bin/bzctl"
+}
+
 # ── NEW ──────────────────────────────────────────
 
 cmd_new() {
@@ -219,13 +340,16 @@ cmd_launch() {
     require_config
     local project
     project="$(project_name)"
+    local project_root_abs
+    project_root_abs="$(pwd -P)"
 
     echo ""
     echo "  ${BOLD}🚀 bz — Launch${NC}"
     echo "  Project: ${project}"
     echo ""
 
-    mkdir -p "${BZ_DIR}/agents" "${BZ_DIR}/logs"
+    mkdir -p "${BZ_DIR}/agents" "${BZ_DIR}/logs" "${BZ_DIR}/memory/agents"
+    write_brain_memory_file "${BZ_DIR}/memory/brain.md"
 
     # Preflight: check required CLIs are installed and authenticated
     local required_runtimes=()
@@ -311,6 +435,9 @@ for i, a in enumerate(d.get('agents', [])):
     done <<< "$(read_yaml_list)"
     local agent_index=0
 
+    control_plane init --agents "${agent_ids[@]}" supervisor >/dev/null 2>&1 || true
+    install_bzctl_wrapper "${BZ_DIR}/bin" "${project_root_abs}"
+
     for agent_id in "${agent_ids[@]}"; do
 
         local runtime cli_cmd model task focus blocked_until thinking
@@ -330,6 +457,9 @@ for i, a in enumerate(d.get('agents', [])):
         # Create agent dir
         local agent_dir="${BZ_DIR}/agents/${agent_id}"
         mkdir -p "${agent_dir}"
+        local memory_rel
+        memory_rel="$(agent_memory_relpath "$agent_id")"
+        write_agent_memory_file "${memory_rel}" "${agent_id}"
 
         # Write BRIEF.md
         cat > "${agent_dir}/BRIEF.md" << BRIEFEOF
@@ -341,23 +471,49 @@ ${task}
 ## Focus directories
 ${focus}
 
+## Memory
+- Your private memory: ${memory_rel}
+- Brain memory: ${BZ_DIR}/memory/brain.md (read only when needed)
+
 ## Rules
 - After EACH file you create/modify: git add <file> && git commit -m "[${agent_id}] <description>"
-- Update ${BZ_DIR}/agents/${agent_id}/STATUS.md after each commit
-- Set State: done when your task is complete
+- After each meaningful step: update the canonical control plane with .bz/bin/bzctl write-state --agent ${agent_id} ...
+- STATUS.md is compatibility output. If bzctl is unavailable, update ${BZ_DIR}/agents/${agent_id}/STATUS.md using the exact field names already present
+- Read .bz/control/contexts/${agent_id}.md before new work and whenever a new action arrives
+- Keep ${memory_rel} current with concise bullets for decisions, blockers, and handoff context
+- Record durable facts/handoffs in the control plane with .bz/bin/bzctl add-memory --owner agent:${agent_id} ...
+- When you need supervisor help, set Needs brain: review|unblock|redirect and explain why in Blocker/Next step
+- Set State: ready-for-review and Needs brain: review when you believe your task is complete
 $([ -n "$blocked_until" ] && echo "- You are BLOCKED until: ${blocked_until}. Set State: blocked until the condition is met.")
 BRIEFEOF
 
         # Write initial STATUS.md
-        cat > "${agent_dir}/STATUS.md" << STATUSEOF
-# STATUS.md
-State: starting
-Summary: Not started yet.
-Files touched: none
-Next step: Read BRIEF.md and begin task.
-Blocker: ${blocked_until:-none}
-Last updated: $(date '+%Y-%m-%d %H:%M')
-STATUSEOF
+        local dependency_hint="none"
+        if [[ -n "$blocked_until" ]]; then
+            dependency_hint="$(printf '%s' "$blocked_until" | awk '{print $1}')"
+        fi
+        local initial_state="starting"
+        local initial_action="reading brief"
+        local initial_needs_brain="no"
+        local initial_next_step="Read BRIEF.md and begin task."
+        if [[ -n "$blocked_until" ]]; then
+            initial_state="blocked"
+            initial_action="waiting on dependency"
+            initial_needs_brain="unblock"
+            initial_next_step="Wait for dependency or supervisor unblock."
+        fi
+        write_status_file \
+            "${agent_dir}/STATUS.md" \
+            "${agent_id}" \
+            "${initial_state}" \
+            "${initial_action}" \
+            "Not started yet." \
+            "none" \
+            "${dependency_hint}" \
+            "${initial_needs_brain}" \
+            "${initial_next_step}" \
+            "${blocked_until:-none}" \
+            "${memory_rel}"
 
         # Create worktree if needed
         local work_dir="."
@@ -373,32 +529,58 @@ STATUSEOF
             git worktree add -q "$wt_path" -b "$branch" 2>/dev/null || true
             # Copy agent state to worktree
             mkdir -p "${wt_path}/${BZ_DIR}/agents/${agent_id}"
+            mkdir -p "${wt_path}/${BZ_DIR}/memory/agents"
             cp "${agent_dir}/BRIEF.md" "${wt_path}/${BZ_DIR}/agents/${agent_id}/"
             cp "${agent_dir}/STATUS.md" "${wt_path}/${BZ_DIR}/agents/${agent_id}/"
+            cp "${memory_rel}" "${wt_path}/${memory_rel}"
+            cp "${BZ_DIR}/memory/brain.md" "${wt_path}/${BZ_DIR}/memory/brain.md"
             work_dir="$wt_path"
             ok "Created worktree: ${branch}"
         fi
+
+        install_bzctl_wrapper "${work_dir}/${BZ_DIR}/bin" "${project_root_abs}"
+        control_plane write-state \
+            --agent "$agent_id" \
+            --phase "${initial_state}" \
+            --action "${initial_action}" \
+            --summary "Not started yet." \
+            --depends-on "${dependency_hint}" \
+            --needs-brain "${initial_needs_brain}" \
+            --files "" \
+            --next-step "${initial_next_step}" \
+            --blocker "${blocked_until:-none}" \
+            --updated-by system \
+            --source launch >/dev/null
 
         # Build agent prompt
         local prompt="You are an autonomous coding agent named '${agent_id}'. Execute your task NOW without asking questions.
 
 Read ${BZ_DIR}/agents/${agent_id}/BRIEF.md for your task.
+Read .bz/control/contexts/${agent_id}.md before touching code.
 
 CRITICAL RULES:
 1. After EACH file: git add <file> && git commit -m \"[${agent_id}] <description>\"
-2. After each commit: update ${BZ_DIR}/agents/${agent_id}/STATUS.md with current State, Summary, Files touched, Next step
-3. State lifecycle: starting → working → executing → ready-for-review → done
+2. Canonical status/action lives in the control plane. After each meaningful step and every commit, run:
+   .bz/bin/bzctl write-state --agent ${agent_id} --phase <starting|planning|blocked|working|executing|ready-for-review> --action \"<current action>\" --summary \"<one-line summary>\" --depends-on \"<agent-id|none>\" --needs-brain \"<no|review|unblock|redirect>\" --files \"file1,file2\" --next-step \"<next step>\" --blocker \"<none or blocker>\" --updated-by agent
+3. Keep ${memory_rel} concise and current with decisions, blockers, and handoff notes
+4. Record durable context in the control plane:
+   .bz/bin/bzctl add-memory --owner agent:${agent_id} --scope <private|shared> --kind <observation|decision|handoff|result|constraint> --summary \"<one-line memory>\" --details \"<durable details only>\"
+5. State lifecycle: starting → planning → blocked → working → executing → ready-for-review → done
    - Set State: working while writing code
+   - Set Action: <current concrete verb phrase> at all times
    - Set State: executing when running scripts/experiments (no more code changes, just compute)
+   - Set Depends on: <agent-id> when you are waiting on another zombie, otherwise none
+   - Set Needs brain: unblock if blocked, redirect if you need new instructions, review when finished, otherwise no
    - Set State: ready-for-review when you believe your task is complete (brain will confirm)
    - Only the brain sets State: done after reviewing your work
+6. If a brain or human message arrives, immediately re-read .bz/control/contexts/${agent_id}.md and .bz/control/agents/${agent_id}/latest-action.md before acting
 
 CONTEXT MANAGEMENT — keep your memory lean:
 - Do NOT read files you don't need. Only read files relevant to your current step.
 - Do NOT re-read files you already read. Remember what's in them.
 - Do NOT cat large files — use grep or head to find what you need.
 - Write files in one shot — don't read-modify-write when you can just write.
-- Keep STATUS.md updates short — one-line summary, not paragraphs.
+- Keep status and memory updates short — one-line summaries and bullets, not paragraphs.
 - If you receive a brain message, act on it immediately without re-reading everything.
 
 START NOW."
@@ -462,13 +644,30 @@ START NOW."
     # Brain runs on-demand (spawned by reconcile loop when needed)
     local sup_dir="${BZ_DIR}/agents/supervisor"
     mkdir -p "$sup_dir"
-    cat > "${sup_dir}/STATUS.md" << SUPSTATEOF
-# STATUS.md
-State: monitoring
-Summary: Brain ready. Wakes on-demand when nerve detects state changes.
-Next step: Wait for nerve signals.
-Last updated: $(date '+%Y-%m-%d %H:%M')
-SUPSTATEOF
+    write_status_file \
+        "${sup_dir}/STATUS.md" \
+        "supervisor" \
+        "monitoring" \
+        "watching agent protocol" \
+        "Brain ready. Wakes on-demand when nerve detects state changes." \
+        "none" \
+        "all-agents" \
+        "no" \
+        "Wait for nerve signals." \
+        "none" \
+        "${BZ_DIR}/memory/brain.md"
+    control_plane write-state \
+        --agent supervisor \
+        --phase monitoring \
+        --action "watching control-plane state" \
+        --summary "Brain ready. Wakes on-demand with structured context." \
+        --depends-on all-agents \
+        --needs-brain no \
+        --files "" \
+        --next-step "Wait for nerve signals." \
+        --blocker none \
+        --updated-by system \
+        --source launch >/dev/null
     ok "Brain ready (on-demand, wakes on state changes)"
 
     # Start reconcile loop
@@ -517,8 +716,10 @@ cmd_status() {
         return
     fi
 
-    printf "  ${BOLD}%-16s %-10s %-8s %-50s${NC}\n" "Agent" "State" "Ctx" "Summary"
-    printf "  %-16s %-10s %-8s %-50s\n" "────────────────" "──────────" "────────" "──────────────────────────────────────────────────"
+    control_plane sync-all --quiet >/dev/null 2>&1 || true
+
+    printf "  ${BOLD}%-16s %-10s %-20s %-8s %-34s${NC}\n" "Agent" "State" "Action" "Ctx" "Summary"
+    printf "  %-16s %-10s %-20s %-8s %-34s\n" "────────────────" "──────────" "────────────────────" "────────" "──────────────────────────────────"
 
     for agent_dir in "${BZ_DIR}/agents"/*/; do
         [[ -d "$agent_dir" ]] || continue
@@ -527,13 +728,14 @@ cmd_status() {
         local status_file="${agent_dir}/STATUS.md"
 
         if [[ ! -f "$status_file" ]]; then
-            printf "  %-16s %-10s %-8s %-50s\n" "$agent_id" "unknown" "-" "No STATUS.md"
+            printf "  %-16s %-10s %-20s %-8s %-34s\n" "$agent_id" "unknown" "-" "-" "No STATUS.md"
             continue
         fi
 
-        local state summary ctx_display
-        state="$(grep '^State:' "$status_file" 2>/dev/null | head -1 | sed 's/State: //')"
-        summary="$(grep '^Summary:' "$status_file" 2>/dev/null | head -1 | sed 's/Summary: //' | cut -c1-48)"
+        local state action summary ctx_display
+        state="$(status_field "$status_file" "State")"
+        action="$(status_field "$status_file" "Action" | cut -c1-18)"
+        summary="$(status_field "$status_file" "Summary" | cut -c1-32)"
 
         # Estimate context usage from tmux pane output
         local sess
@@ -555,12 +757,13 @@ cmd_status() {
         local color="$NC"
         case "$state" in
             done) color="$GREEN" ;;
-            working|planning) color="$BLUE" ;;
+            working|planning|executing|monitoring) color="$BLUE" ;;
+            ready-for-review) color="$GREEN" ;;
             blocked) color="$YELLOW" ;;
             *) color="$RED" ;;
         esac
 
-        printf "  %-16s ${color}%-10s${NC} ${ctx_display}%-2s %-50s\n" "$agent_id" "$state" "" "$summary"
+        printf "  %-16s ${color}%-10s${NC} %-20s ${ctx_display}%-2s %-34s\n" "$agent_id" "$state" "${action:-"-"}" "" "$summary"
     done
 
     # Show tmux sessions
@@ -752,6 +955,27 @@ cmd_feedback() {
         exit 1
     fi
 
+    control_plane queue-action \
+        --from human \
+        --to "$target" \
+        --kind feedback \
+        --summary "$message" \
+        --details "$message" \
+        --reason "Human feedback" >/dev/null
+    control_plane write-state \
+        --agent "$target" \
+        --phase working \
+        --action "addressing human feedback" \
+        --summary "Reopened for human feedback." \
+        --depends-on human \
+        --needs-brain no \
+        --files "" \
+        --next-step "Read .bz/control/contexts/${target}.md and address the latest action." \
+        --blocker none \
+        --updated-by human \
+        --source feedback >/dev/null
+    sync_agent_protocol_to_worktree "$target"
+
     local sess
     sess="$(session_name "$target")"
 
@@ -791,23 +1015,11 @@ cmd_feedback() {
         wt_path="$(worktree_path "$target")"
         [[ -d "$wt_path" ]] && work_dir="$wt_path"
 
-        # Update STATUS.md to working
-        local status_file="${BZ_DIR}/agents/${target}/STATUS.md"
-        cat > "$status_file" << STATUSEOF
-# STATUS.md
-State: working
-Summary: Reopened for human feedback.
-Files touched: pending
-Next step: Address feedback.
-Blocker: none
-Last updated: $(date '+%Y-%m-%d %H:%M')
-STATUSEOF
-
         local prompt="HUMAN FEEDBACK — act on this immediately:
 
-${message}
+Read .bz/control/contexts/${target}.md and .bz/control/agents/${target}/latest-action.md first.
 
-Read your previous work in the worktree, apply the fix, commit with [${target}] prefix, and update .bz/agents/${target}/STATUS.md to done when finished."
+Then read your previous work in the worktree and your memory file ${BZ_DIR}/memory/agents/${target}.md, apply the fix, commit with [${target}] prefix, update your canonical state with .bz/bin/bzctl write-state, and update your memory with the outcome. Set Needs brain: review when finished."
 
         tmux new-session -d -s "$sess" -x 200 -y 50
         local cmd
@@ -827,13 +1039,21 @@ Read your previous work in the worktree, apply the fix, commit with [${target}] 
         ok "Restarted ${target} with feedback"
     else
         # Zombie still running — send feedback into active session
-        tmux send-keys -t "$sess" "HUMAN FEEDBACK: ${message}" Enter
+        tmux send-keys -t "$sess" "NEW HUMAN ACTION queued. Read .bz/control/contexts/${target}.md and .bz/control/agents/${target}/latest-action.md now, then act." Enter
         ok "Sent feedback to ${target}"
     fi
 
     # Log feedback
     mkdir -p "${BZ_DIR}/logs"
     echo "$(date -Iseconds) | target=${target} | ${message}" >> "${BZ_DIR}/logs/feedback.log"
+    if [[ -f "$(agent_memory_relpath "$target")" ]]; then
+        {
+            echo ""
+            echo "## $(date '+%Y-%m-%d %H:%M') — Human feedback"
+            echo "- ${message}"
+        } >> "$(agent_memory_relpath "$target")"
+        sync_agent_protocol_to_worktree "$target"
+    fi
 
     echo ""
     info "Monitor with: bz status"

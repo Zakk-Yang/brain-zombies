@@ -42,15 +42,17 @@ You write a brief → brain spawns zombies → zombies code autonomously
 Each zombie:
 - Runs a real coding CLI (Claude Code, Codex, Aider)
 - Has its own git worktree (isolated branch)
-- Updates STATUS.md with lifecycle state
+- Updates STATUS.md with lifecycle state, current action, dependency, and explicit brain-request fields
+- Maintains its own memory file for decisions, blockers, and handoff context
 - Commits after each file with `[zombie-id]` prefix
 - Doesn't think — just executes
 
 The brain:
 - Wakes on zombie state changes (not polling)
+- Wakes immediately when a zombie explicitly requests help via `Needs brain`
 - Sends orders (continue / redirect / done)
 - Routes human feedback to the right zombie
-- Manages handoffs between zombies
+- Manages handoffs between zombies with bounded brain/agent memory excerpts
 
 ## Architecture
 
@@ -60,16 +62,33 @@ bz.yaml                    ← single config file
   agents/
     researcher/
       BRIEF.md             ← task assignment (the order)
-      STATUS.md             ← lifecycle: starting→working→done
+      STATUS.md            ← lifecycle + action/dependency protocol
     developer/
       BRIEF.md
       STATUS.md
+  memory/
+    brain.md               ← supervisor memory / cross-agent notes
+    agents/
+      researcher.md        ← private agent memory / handoff context
+      developer.md
   worktrees/
     researcher/             ← isolated git worktree
     developer/
   logs/
     reconcile.log
 ```
+
+## Status Protocol
+
+Each `STATUS.md` now carries a small, standardized control surface:
+
+- `State` for lifecycle
+- `Action` for the current concrete task
+- `Depends on` for cross-agent dependency
+- `Needs brain` for explicit supervisor intervention
+- `Summary`, `Files touched`, `Next step`, `Blocker`, `Memory`, and `Last updated` for handoff context
+
+That lets the brain coordinate from explicit action-oriented state instead of inferring everything from freeform summaries.
 
 ## Commands
 

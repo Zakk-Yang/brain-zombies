@@ -169,6 +169,31 @@ def read_status(agent_id):
     return fields
 
 
+def memory_path(agent_id):
+    """Return memory file path for an agent or supervisor."""
+    if agent_id == "supervisor":
+        return BZ_DIR / "memory" / "brain.md"
+    return BZ_DIR / "memory" / "agents" / f"{agent_id}.md"
+
+
+def read_memory_excerpt(agent_id, lines=6):
+    """Return a compact recent memory excerpt for dashboard display."""
+    path = memory_path(agent_id)
+    if not path.exists():
+        return ""
+
+    text = path.read_text().splitlines()
+    recent = []
+    for line in reversed(text):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        recent.append(line)
+        if len(recent) >= lines:
+            break
+    return " | ".join(reversed(recent))
+
+
 def get_phase(state, agent_id=None):
     """Map state to standardized phase.
 
@@ -529,6 +554,9 @@ def build_dashboard_data():
         runtime = ac.get("runtime", "")
         status = read_status(aid)
         state = status.get("state", "unknown")
+        action = status.get("action", "")
+        depends_on = status.get("depends on", "none")
+        needs_brain = status.get("needs brain", "no")
         phase = get_phase(state, aid)
         usage = get_token_usage(aid)
         cost = estimate_cost_from_usage(usage, model)
@@ -553,12 +581,17 @@ def build_dashboard_data():
             "thinking_mode": thinking_mode,
             "phase": phase,
             "state": state,
+            "action": action,
             "summary": status.get("summary", "No summary"),
             "files": file_list,
             "file_count": file_count,
+            "depends_on": depends_on,
+            "needs_brain": needs_brain,
             "next_step": status.get("next step", ""),
             "blocker": status.get("blocker", "none"),
             "last_updated": last_updated,
+            "memory_path": status.get("memory", str(memory_path(aid).relative_to(PROJECT_ROOT))),
+            "memory_excerpt": read_memory_excerpt(aid),
             "input_tokens": usage["input_tokens"],
             "output_tokens": usage["output_tokens"],
             "cache_read": usage["cache_read"],
@@ -584,6 +617,11 @@ def build_dashboard_data():
     brain_usage = get_token_usage("supervisor") if (BZ_DIR / "agents" / "supervisor").exists() else {"input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_write": 0, "total": 0}
     brain_tokens = brain_usage["total"]
     brain_cost = estimate_cost_from_usage(brain_usage, supervisor.get("model", ""))
+    brain_requests = sum(
+        1
+        for z in zombies
+        if (z.get("needs_brain", "") or "").lower() not in ("", "no", "none")
+    )
 
     # All finished? (brain confirmed, not just zombie self-reported done)
     all_finished = all(z["phase"] == "finished" for z in zombies) if zombies else False
@@ -630,7 +668,10 @@ def build_dashboard_data():
             "cache_write": brain_usage.get("cache_write", 0),
             "tokens": brain_usage.get("total_billed", brain_tokens),
             "estimated_cost": brain_cost,
-            "status": "idle" if all(z.get("state") == "done" for z in zombies) else "monitoring",
+            "status": "attention" if brain_requests else ("idle" if all(z.get("state") == "done" for z in zombies) else "monitoring"),
+            "active_requests": brain_requests,
+            "memory_path": str(memory_path("supervisor").relative_to(PROJECT_ROOT)),
+            "memory_excerpt": read_memory_excerpt("supervisor", lines=8),
         },
         "zombies": zombies,
         "cost": {

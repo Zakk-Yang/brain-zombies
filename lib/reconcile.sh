@@ -22,12 +22,14 @@ LOG_DIR="${BZ_DIR}/logs"
 SIGNATURES_FILE="${LOG_DIR}/.signatures"
 LAST_PROACTIVE_FILE="${LOG_DIR}/.last-proactive"
 LAST_COMMIT_FILE="${LOG_DIR}/.last-commits"
+MEMORY_DIR="${BZ_DIR}/memory"
+BRAIN_MEMORY_FILE="${MEMORY_DIR}/brain.md"
 
 SCAN_INTERVAL=30
 PROACTIVE_INTERVAL=900   # 15 min default
 STALL_THRESHOLD=600      # 10 min without commits = stalled
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "${MEMORY_DIR}/agents"
 
 # Read config
 if [[ -f "${PROJECT_ROOT}/bz.yaml" ]]; then
@@ -41,6 +43,10 @@ fi
 
 # ── Helpers ──────────────────────────────────────
 
+log() {
+    echo "[nerve] $(date '+%H:%M:%S') $*"
+}
+
 project_name() {
     python3 -c "
 import yaml
@@ -49,15 +55,191 @@ with open('${PROJECT_ROOT}/bz.yaml') as f:
 " 2>/dev/null || echo "unknown"
 }
 
+control_plane() {
+    python3 "${PROJECT_ROOT}/lib/control_plane.py" --project-root "${PROJECT_ROOT}" "$@"
+}
+
 PROJECT_NAME="$(project_name)"
+
+status_field() {
+    local status_file="$1"
+    local key="$2"
+    grep "^${key}:" "$status_file" 2>/dev/null | head -1 | sed "s/^${key}: //"
+}
+
+agent_status_file() {
+    echo "${BZ_DIR}/agents/$1/STATUS.md"
+}
+
+agent_memory_file() {
+    echo "${MEMORY_DIR}/agents/$1.md"
+}
+
+ensure_brain_memory() {
+    if [[ ! -f "$BRAIN_MEMORY_FILE" ]]; then
+        cat > "$BRAIN_MEMORY_FILE" <<'EOF'
+# Brain Memory
+
+## Coordination notes
+- Track cross-agent dependencies, review outcomes, and recurring failure modes here.
+
+## Global blockers
+- none
+
+## Open handoffs
+- none
+EOF
+    fi
+}
+
+write_status_file() {
+    local path="$1"; shift
+    local agent_id="$1"; shift
+    local state="$1"; shift
+    local action="$1"; shift
+    local summary="$1"; shift
+    local files_touched="$1"; shift
+    local depends_on="$1"; shift
+    local needs_brain="$1"; shift
+    local next_step="$1"; shift
+    local blocker="$1"; shift
+    local memory_path="${1:-$(agent_memory_file "$agent_id")}"
+
+    cat > "$path" <<EOF
+# STATUS.md
+State: ${state}
+Action: ${action}
+Summary: ${summary}
+Files touched: ${files_touched}
+Depends on: ${depends_on}
+Needs brain: ${needs_brain}
+Next step: ${next_step}
+Blocker: ${blocker}
+Memory: ${memory_path}
+Last updated: $(date '+%Y-%m-%d %H:%M')
+EOF
+}
+
+memory_excerpt() {
+    local path="$1"
+    local lines="${2:-12}"
+    [[ -f "$path" ]] || return 0
+    tail -n "$lines" "$path"
+}
+
+append_brain_memory() {
+    local header="$1"
+    local body="$2"
+    ensure_brain_memory
+    {
+        echo ""
+        echo "## $(date '+%Y-%m-%d %H:%M') — ${header}"
+        echo "- ${body}"
+    } >> "$BRAIN_MEMORY_FILE"
+}
+
+push_protocol_to_worktree() {
+    local agent_id="$1"
+    local wt="${BZ_DIR}/worktrees/${agent_id}"
+    [[ -d "$wt" ]] || return 0
+
+    local rel_bz="${BZ_DIR#${PROJECT_ROOT}/}"
+    local rel_memory_dir="${MEMORY_DIR#${PROJECT_ROOT}/}"
+    local rel_brain="${BRAIN_MEMORY_FILE#${PROJECT_ROOT}/}"
+    local agent_memory_src
+    agent_memory_src="$(agent_memory_file "$agent_id")"
+    local rel_agent_memory="${agent_memory_src#${PROJECT_ROOT}/}"
+
+    mkdir -p "${wt}/${rel_bz}/agents/${agent_id}" "${wt}/${rel_memory_dir}/agents"
+    [[ -f "${BZ_DIR}/agents/${agent_id}/STATUS.md" ]] && cp "${BZ_DIR}/agents/${agent_id}/STATUS.md" "${wt}/${rel_bz}/agents/${agent_id}/STATUS.md"
+    [[ -f "${BZ_DIR}/agents/${agent_id}/DECISION.md" ]] && cp "${BZ_DIR}/agents/${agent_id}/DECISION.md" "${wt}/${rel_bz}/agents/${agent_id}/DECISION.md"
+    [[ -f "$agent_memory_src" ]] && cp "$agent_memory_src" "${wt}/${rel_agent_memory}"
+    [[ -f "$BRAIN_MEMORY_FILE" ]] && cp "$BRAIN_MEMORY_FILE" "${wt}/${rel_brain}"
+}
+
+update_status_after_decision() {
+    local target="$1"
+    local decision_type="$2"
+    local detail="$3"
+    local status_file
+    status_file="$(agent_status_file "$target")"
+    [[ -f "$status_file" ]] || return 0
+
+    local state files depends memory
+    state="$(status_field "$status_file" "State")"
+    files="$(status_field "$status_file" "Files touched")"
+    depends="$(status_field "$status_file" "Depends on")"
+    memory="$(status_field "$status_file" "Memory")"
+
+    local action="$decision_type"
+    local summary="$detail"
+    local next_step="$detail"
+    local blocker="none"
+    local needs_brain="no"
+
+    case "$decision_type" in
+        accept|complete)
+            state="done"
+            action="brain accepted work"
+            summary="Brain accepted work."
+            next_step="Wait for merge or next assignment."
+            ;;
+        redirect|reject)
+            state="working"
+            action="following brain redirect"
+            summary="Brain redirect: ${detail:-follow updated instructions}."
+            next_step="${detail:-Follow brain redirect.}"
+            ;;
+        unblock)
+            state="working"
+            action="following brain unblock"
+            summary="Brain removed blocker."
+            next_step="${detail:-Continue execution.}"
+            blocker="none"
+            ;;
+        restart)
+            state="working"
+            action="restarting after brain intervention"
+            summary="Brain requested a restart."
+            next_step="${detail:-Restart task execution.}"
+            ;;
+        hold)
+            state="blocked"
+            action="waiting on brain hold"
+            summary="Brain placed this task on hold."
+            next_step="Wait for new instructions."
+            blocker="${detail:-brain hold}"
+            ;;
+        *)
+            action="following brain decision"
+            summary="Brain decision: ${detail:-follow latest decision}."
+            next_step="${detail:-Read DECISION.md and act.}"
+            ;;
+    esac
+
+    write_status_file \
+        "$status_file" \
+        "$target" \
+        "$state" \
+        "$action" \
+        "$summary" \
+        "${files:-none}" \
+        "${depends:-none}" \
+        "$needs_brain" \
+        "$next_step" \
+        "$blocker" \
+        "${memory:-$(agent_memory_file "$target")}"
+    push_protocol_to_worktree "$target"
+}
 
 capture_signatures() {
     for status_file in "${BZ_DIR}/agents"/*/STATUS.md; do
         [[ -f "$status_file" ]] || continue
         local agent_id
         agent_id="$(basename "$(dirname "$status_file")")"
+        [[ "$agent_id" == "supervisor" ]] && continue
         local sig
-        sig="$(grep -E '^(State|Blocker):' "$status_file" 2>/dev/null | tr '\n' '|')"
+        sig="$(grep -E '^(State|Action|Depends on|Needs brain|Blocker):' "$status_file" 2>/dev/null | tr '\n' '|')"
         echo "${agent_id}=${sig}"
     done | sort
 }
@@ -72,12 +254,12 @@ all_done() {
         has_agents=1
 
         local state
-        state="$(grep '^State:' "${agent_dir}/STATUS.md" 2>/dev/null | head -1 | sed 's/State: //')"
+        state="$(status_field "${agent_dir}/STATUS.md" "State")"
         # Must be done AND have brain confirmation
-        if [[ "$state" != "done" && "$state" != "ready-for-review" ]]; then
+        if [[ "$state" != "done" && "$state" != "finished" && "$state" != "ready-for-review" ]]; then
             return 1
         fi
-        if [[ ! -f "${agent_dir}/DECISION.md" ]]; then
+        if [[ "$state" == "ready-for-review" && ! -f "${agent_dir}/DECISION.md" ]]; then
             return 1  # brain hasn't confirmed
         fi
     done
@@ -92,6 +274,25 @@ sync_status_from_worktrees() {
         local main_status="${BZ_DIR}/agents/${agent_id}/STATUS.md"
         if [[ -f "$main_status" && "$wt_status" -nt "$main_status" ]]; then
             cp "$wt_status" "$main_status"
+        fi
+    done
+}
+
+sync_memory_from_worktrees() {
+    for wt_memory in "${BZ_DIR}/worktrees"/*/".bz/memory/agents"/*.md; do
+        [[ -f "$wt_memory" ]] || continue
+        local fname
+        fname="$(basename "$wt_memory")"
+        local main_memory="${MEMORY_DIR}/agents/${fname}"
+        if [[ ! -f "$main_memory" || "$wt_memory" -nt "$main_memory" ]]; then
+            cp "$wt_memory" "$main_memory"
+        fi
+    done
+
+    for wt_brain in "${BZ_DIR}/worktrees"/*/".bz/memory/brain.md"; do
+        [[ -f "$wt_brain" ]] || continue
+        if [[ ! -f "$BRAIN_MEMORY_FILE" || "$wt_brain" -nt "$BRAIN_MEMORY_FILE" ]]; then
+            cp "$wt_brain" "$BRAIN_MEMORY_FILE"
         fi
     done
 }
@@ -131,7 +332,7 @@ check_hallucination() {
         [[ "$agent_id" == "supervisor" ]] && continue
 
         local state
-        state="$(grep '^State:' "${agent_dir}/STATUS.md" 2>/dev/null | head -1 | sed 's/State: //')"
+        state="$(status_field "${agent_dir}/STATUS.md" "State")"
 
         # Only check agents claiming completion
         [[ "$state" != "done" && "$state" != "ready-for-review" ]] && continue
@@ -157,21 +358,44 @@ check_hallucination() {
                     log "HALLUCINATION DETECTED: ${agent_id} claims '${state}' with files '${files_touched}' but has zero git changes"
 
                     # Auto-reject: reset status and restart
-                    cat > "${agent_dir}/STATUS.md" << FRAUD_EOF
-# STATUS.md
-State: executing
-Summary: RESTARTED — previous completion was rejected (zero git changes detected). You must actually write code, run experiments, and git commit your work.
-Files touched: none
-Next step: Re-read BRIEF.md and do the actual work. Commit files as you go.
-Blocker: none
-Last updated: $(date '+%Y-%m-%d %H:%M')
-FRAUD_EOF
+                    write_status_file \
+                        "${agent_dir}/STATUS.md" \
+                        "${agent_id}" \
+                        "working" \
+                        "recovering from rejected completion" \
+                        "Previous completion was rejected because no git changes were found." \
+                        "none" \
+                        "$(status_field "${agent_dir}/STATUS.md" "Depends on")" \
+                        "no" \
+                        "Re-read BRIEF.md and do the actual work. Commit files as you go." \
+                        "none" \
+                        "$(status_field "${agent_dir}/STATUS.md" "Memory")"
                 fi
             fi
         fi
     done
 
     [[ -n "$frauds" ]] && echo "$frauds" && return 0
+    return 1
+}
+
+check_brain_requests() {
+    local pending=""
+    for agent_dir in "${BZ_DIR}/agents"/*/; do
+        [[ -d "$agent_dir" ]] || continue
+        local agent_id
+        agent_id="$(basename "$agent_dir")"
+        [[ "$agent_id" == "supervisor" ]] && continue
+
+        local status_file="${agent_dir}/STATUS.md"
+        local needs_brain
+        needs_brain="$(status_field "$status_file" "Needs brain" | tr '[:upper:]' '[:lower:]')"
+        [[ -z "$needs_brain" || "$needs_brain" == "no" || "$needs_brain" == "none" ]] && continue
+
+        pending="${pending} ${agent_id}(${needs_brain})"
+    done
+
+    [[ -n "$pending" ]] && echo "$pending" && return 0
     return 1
 }
 
@@ -187,8 +411,8 @@ check_zombie_alive() {
         # Skip supervisor and already-done zombies
         [[ "$agent_id" == "supervisor" ]] && continue
         local state
-        state="$(grep '^State:' "${agent_dir}/STATUS.md" 2>/dev/null | head -1 | sed 's/State: //')"
-        [[ "$state" == "done" ]] && continue
+        state="$(status_field "${agent_dir}/STATUS.md" "State")"
+        [[ "$state" == "done" || "$state" == "finished" ]] && continue
 
         if ! tmux has-session -t "$sess" 2>/dev/null; then
             dead="${dead} ${agent_id}"
@@ -212,12 +436,12 @@ check_stalled() {
         [[ "$agent_id" == "supervisor" ]] && continue
 
         local state
-        state="$(grep '^State:' "${agent_dir}/STATUS.md" 2>/dev/null | head -1 | sed 's/State: //')"
-        [[ "$state" == "done" || "$state" == "blocked" || "$state" == "starting" || "$state" == "executing" || "$state" == "running" || "$state" == "ready-for-review" ]] && continue
+        state="$(status_field "${agent_dir}/STATUS.md" "State")"
+        [[ "$state" == "done" || "$state" == "finished" || "$state" == "blocked" || "$state" == "starting" || "$state" == "executing" || "$state" == "running" || "$state" == "ready-for-review" ]] && continue
 
         # Also skip stall check if summary mentions running/executing
         local summary
-        summary="$(grep '^Summary:' "${agent_dir}/STATUS.md" 2>/dev/null | head -1 | sed 's/Summary: //' | tr '[:upper:]' '[:lower:]')"
+        summary="$(status_field "${agent_dir}/STATUS.md" "Summary" | tr '[:upper:]' '[:lower:]')"
         if [[ "$summary" == *"running"* || "$summary" == *"experiment"* || "$summary" == *"executing"* || "$summary" == *"training"* ]]; then
             continue
         fi
@@ -251,10 +475,12 @@ check_pending_review() {
         [[ "$agent_id" == "supervisor" ]] && continue
 
         local state
-        state="$(grep '^State:' "${agent_dir}/STATUS.md" 2>/dev/null | head -1 | sed 's/State: //')"
+        state="$(status_field "${agent_dir}/STATUS.md" "State")"
+        local needs_brain
+        needs_brain="$(status_field "${agent_dir}/STATUS.md" "Needs brain" | tr '[:upper:]' '[:lower:]')"
 
         # Zombie says done or ready-for-review but no DECISION.md from brain
-        if [[ "$state" == "done" || "$state" == "ready-for-review" ]]; then
+        if [[ "$state" == "done" || "$state" == "ready-for-review" || "$needs_brain" == "review" ]]; then
             if [[ ! -f "${agent_dir}/DECISION.md" ]]; then
                 pending="${pending} ${agent_id}"
             fi
@@ -271,6 +497,8 @@ gather_agent_work() {
     local work=""
     local wt="${BZ_DIR}/worktrees/${agent_id}"
     local agent_dir="${BZ_DIR}/agents/${agent_id}"
+    local memory_file
+    memory_file="$(agent_memory_file "$agent_id")"
 
     # Full STATUS.md
     if [[ -f "${agent_dir}/STATUS.md" ]]; then
@@ -327,6 +555,13 @@ ${content}"
 ${content}"
     done
 
+    if [[ -f "$memory_file" ]]; then
+        work="${work}
+
+--- Agent memory (tail) ---
+$(memory_excerpt "$memory_file" 14)"
+    fi
+
     echo "$work"
 }
 
@@ -335,52 +570,30 @@ ${content}"
 wake_brain() {
     local reason="$1"
     local mode="$2"   # reactive | proactive | crash | stall
+    ensure_brain_memory
+    control_plane sync-all --quiet >/dev/null 2>&1 || true
 
-    # Build context: all zombie statuses
-    local status_summary=""
-    for sf in "${BZ_DIR}/agents"/*/STATUS.md; do
-        [[ -f "$sf" ]] || continue
-        local aid
-        aid="$(basename "$(dirname "$sf")")"
-        [[ "$aid" == "supervisor" ]] && continue
-        local state summary blocker
-        state="$(grep '^State:' "$sf" 2>/dev/null | head -1 | sed 's/State: //')"
-        summary="$(grep '^Summary:' "$sf" 2>/dev/null | head -1 | sed 's/Summary: //')"
-        blocker="$(grep '^Blocker:' "$sf" 2>/dev/null | head -1 | sed 's/Blocker: //')"
-        status_summary="${status_summary}
-- ${aid}: state=${state} | ${summary} | blocker=${blocker}"
-    done
+    local brain_context
+    brain_context="$(control_plane render-context --viewer brain 2>/dev/null || true)"
+    [[ -z "$brain_context" && -f "$BRAIN_MEMORY_FILE" ]] && brain_context="$(cat "$BRAIN_MEMORY_FILE")"
 
-    local prompt
+    local mode_brief=""
+    local extra_context=""
     case "$mode" in
         reactive)
-            prompt="NERVE SIGNAL: Zombie state change detected —${reason}.
-
-Current zombie states:${status_summary}
-
-YOUR JOB: Read the states above. If any zombie just finished (state=done) and another is blocked waiting for it, write a DECISION file to unblock it. If any zombie is stuck, write a redirect. Write your decisions to .bz/agents/<zombie-id>/DECISION.md with clear instructions.
-
-For each decision, output a line: DECISION: <zombie-id> — <action> — <reason>" ;;
+            mode_brief="A zombie state or action changed. Decide whether intervention is needed right now."
+            ;;
         crash)
-            prompt="ZOMBIE DOWN:${reason} — tmux session died.
-
-Current zombie states:${status_summary}
-
-YOUR JOB: Assess if the crashed zombie's work was committed. Write a DECISION file for it (restart or reassign). Output: DECISION: <zombie-id> — <action> — <reason>" ;;
+            mode_brief="One or more zombie tmux sessions died. Decide whether to restart, redirect, or hold affected zombies."
+            ;;
         stall)
-            prompt="STALL DETECTED:${reason} — no commits for 10+ minutes while State=working.
-
-Current zombie states:${status_summary}
-
-YOUR JOB: Investigate why the zombie stalled. Write a DECISION file with specific instructions to get it moving. Output: DECISION: <zombie-id> — <action> — <reason>" ;;
+            mode_brief="One or more zombies appear stalled. Diagnose likely cause from context and issue a concrete unblock or redirect."
+            ;;
         proactive)
-            prompt="HEARTBEAT CHECK: Routine progress check.
-
-Current zombie states:${status_summary}
-
-YOUR JOB: Verify all zombies are making progress. If any need intervention, write DECISION files. If all are fine, just output: ALL CLEAR. Output: DECISION: <zombie-id> — <action> — <reason>" ;;
+            mode_brief="Run a proactive supervision pass. If no intervention is required, return an empty actions list."
+            ;;
         review)
-            # Gather actual work from each pending agent
+            mode_brief="Pending zombies are asking for review. Accept, redirect, or hold them based on evidence."
             local review_details=""
             for rid in ${reason}; do
                 local agent_work
@@ -392,26 +605,58 @@ YOUR JOB: Verify all zombies are making progress. If any need intervention, writ
 "
                 fi
             done
-
-            prompt="REVIEW REQUEST: Zombies pending review —${reason}.
-
-Current zombie states:${status_summary}
-
-=== DETAILED WORK FOR REVIEW ===${review_details}
-
-YOUR JOB: Review the work above for each pending zombie. Check:
-1. Did commits actually land? (check git commits section)
-2. Do the results meet the success criteria in PROJECT_BRIEF.md?
-3. Are the reported metrics plausible (not hallucinated)?
-
-You MUST output one DECISION line per pending zombie. No exceptions. No skipping.
-Use EXACTLY this format (plain text, no markdown, no bold):
-DECISION: zombie-id — accept — reason
-DECISION: zombie-id — reject — reason
-DECISION: zombie-id — redirect — new instructions
-
-Pending zombies that MUST each get a DECISION line: ${reason}" ;;
+            extra_context="## Detailed Review Inputs
+${review_details}"
+            ;;
     esac
+
+    local json_contract='Return exactly one JSON object with this shape:
+{
+  "brain_state": {
+    "phase": "monitoring",
+    "action": "short brain action",
+    "summary": "short summary of what brain concluded",
+    "depends_on": [],
+    "needs_brain": "no",
+    "next_step": "wait for next signal",
+    "blocker": "none"
+  },
+  "brain_memory": [
+    {
+      "scope": "private or shared",
+      "kind": "decision | handoff | constraint | result | observation",
+      "summary": "durable memory in one line",
+      "details": "compact durable detail",
+      "tags": ["optional-tag"],
+      "related_agents": ["optional-agent-id"]
+    }
+  ],
+  "actions": [
+    {
+      "to": "agent-id",
+      "kind": "accept | redirect | unblock | restart | hold",
+      "summary": "one-line instruction/result",
+      "details": "specific action the zombie should take next",
+      "reason": "why this action is needed"
+    }
+  ]
+}
+Rules:
+- actions must be [] if no zombie intervention is needed
+- use kind=accept only when review evidence is good enough to mark the zombie done
+- keep brain_memory compact and durable
+- do not include markdown fences or any text before/after the JSON object'
+
+    local prompt="${mode_brief}
+
+Reason: ${reason}
+
+## Canonical Brain Context
+${brain_context}
+
+${extra_context}
+
+${json_contract}"
 
     # Read brain config
     local brain_runtime brain_model brain_cli
@@ -442,10 +687,12 @@ print(d.get('supervisor',{}).get('thinking',''))
     esac
 
     echo "[brain] $(date '+%H:%M:%S') WAKE (${mode}):${reason}"
+    append_brain_memory "wake ${mode}" "Reason: ${reason}"
 
     # On-demand brain call — captured output
     local brain_output=""
     local brain_prompt_file="${BZ_DIR}/logs/brain-prompt-$(date +%s).txt"
+    local brain_output_file="${BZ_DIR}/logs/brain-output-$(date +%s).txt"
     echo "$prompt" > "$brain_prompt_file"
 
     # Claude Code CLI uses --effort (low/medium/high/max), not --thinking
@@ -470,47 +717,42 @@ print(d.get('supervisor',{}).get('thinking',''))
 
     # Log brain output
     echo "[brain] $(date '+%H:%M:%S') RESPONSE: ${brain_output}" | head -20
+    echo "$brain_output" > "$brain_output_file"
 
-    # Parse decisions and relay to zombies
-    # Strip markdown (bold, italic, headings, code) then find DECISION lines
-    echo "$brain_output" | sed 's/\*\*//g; s/\*//g; s/__//g; s/`//g; s/^#\+ *//' | grep "^DECISION:" | while IFS= read -r decision_line; do
-        local target action
-        target="$(echo "$decision_line" | sed 's/DECISION: //' | cut -d'—' -f1 | xargs)"
-        action="$(echo "$decision_line" | cut -d'—' -f2- | xargs)"
+    local queued_targets=""
+    queued_targets="$(control_plane ingest-brain-output --output-file "$brain_output_file" --mode "$mode" --reason "$reason" 2>/dev/null || true)"
 
-        if [[ -n "$target" && -n "$action" ]]; then
-            # Write decision file
-            local decision_file="${BZ_DIR}/agents/${target}/DECISION.md"
-            echo "# Brain Decision ($(date '+%H:%M:%S'))
-${action}" > "$decision_file"
+    while IFS= read -r target; do
+        [[ -n "$target" ]] || continue
 
-            # Send to zombie — restart CLI if it exited
-            local zombie_sess="bz-${PROJECT_NAME}-${target}"
-            local cli_alive=0
-            if tmux has-session -t "$zombie_sess" 2>/dev/null; then
-                local pane_pid
-                pane_pid="$(tmux list-panes -t "$zombie_sess" -F '#{pane_pid}' 2>/dev/null | head -1)"
-                if [[ -n "$pane_pid" ]] && pgrep -P "$pane_pid" -f "claude|codex|aider" >/dev/null 2>&1; then
-                    cli_alive=1
-                fi
+        local action_summary
+        action_summary="$(control_plane latest-action --agent "$target" --format summary 2>/dev/null || echo "new brain action")"
+        append_brain_memory "decision ${target}" "${action_summary}"
+
+        local zombie_sess="bz-${PROJECT_NAME}-${target}"
+        local cli_alive=0
+        if tmux has-session -t "$zombie_sess" 2>/dev/null; then
+            local pane_pid
+            pane_pid="$(tmux list-panes -t "$zombie_sess" -F '#{pane_pid}' 2>/dev/null | head -1)"
+            if [[ -n "$pane_pid" ]] && pgrep -P "$pane_pid" -f "claude|codex|aider" >/dev/null 2>&1; then
+                cli_alive=1
             fi
+        fi
 
-            if [[ "$cli_alive" -eq 1 ]]; then
-                tmux send-keys -t "$zombie_sess" "BRAIN DECISION: ${action}" Enter
-            else
-                # CLI exited — restart with decision as prompt
-                echo "[brain] $(date '+%H:%M:%S') Restarting ${target} CLI to deliver decision"
-                tmux kill-session -t "$zombie_sess" 2>/dev/null || true
+        if [[ "$cli_alive" -eq 1 ]]; then
+            tmux send-keys -t "$zombie_sess" "NEW BRAIN ACTION queued. Read .bz/control/contexts/${target}.md and .bz/control/agents/${target}/latest-action.md now, then act." Enter
+        else
+            echo "[brain] $(date '+%H:%M:%S') Restarting ${target} CLI to deliver action"
+            tmux kill-session -t "$zombie_sess" 2>/dev/null || true
 
-                local wt_path="${BZ_DIR}/worktrees/${target}"
-                local work_dir="${PROJECT_ROOT}"
-                [[ -d "$wt_path" ]] && work_dir="$wt_path"
-                local abs_work_dir
-                abs_work_dir="$(realpath "$work_dir")"
+            local wt_path="${BZ_DIR}/worktrees/${target}"
+            local work_dir="${PROJECT_ROOT}"
+            [[ -d "$wt_path" ]] && work_dir="$wt_path"
+            local abs_work_dir
+            abs_work_dir="$(realpath "$work_dir")"
 
-                # Read zombie's runtime/model from config
-                local z_cli z_model
-                z_cli="$(python3 -c "
+            local z_cli z_model
+            z_cli="$(python3 -c "
 import yaml
 with open('${PROJECT_ROOT}/bz.yaml') as f:
     d = yaml.safe_load(f)
@@ -520,7 +762,7 @@ for a in d.get('agents',[]):
         print('claude' if r in ('claude','claude-code') else r)
         break
 " 2>/dev/null || echo "claude")"
-                z_model="$(python3 -c "
+            z_model="$(python3 -c "
 import yaml
 with open('${PROJECT_ROOT}/bz.yaml') as f:
     d = yaml.safe_load(f)
@@ -530,30 +772,30 @@ for a in d.get('agents',[]):
         break
 " 2>/dev/null || echo "sonnet")"
 
-                local restart_prompt="BRAIN DECISION: ${action}
+            local restart_prompt="NEW BRAIN ACTION queued.
 
-Read ${BZ_DIR}/agents/${target}/DECISION.md for full instructions. Execute NOW."
-                local restart_prompt_file="${BZ_DIR}/agents/${target}/RESTART_PROMPT.txt"
-                echo "$restart_prompt" > "$restart_prompt_file"
+Read .bz/control/contexts/${target}.md and .bz/control/agents/${target}/latest-action.md first.
+Then execute the action immediately."
+            local restart_prompt_file="${BZ_DIR}/agents/${target}/RESTART_PROMPT.txt"
+            echo "$restart_prompt" > "$restart_prompt_file"
 
-                local restart_cmd
-                if [[ "$z_cli" == "claude" ]]; then
-                    restart_cmd="cd ${abs_work_dir} && claude --dangerously-skip-permissions --model ${z_model} -p \"\$(cat ${restart_prompt_file})\""
-                elif [[ "$z_cli" == "codex" ]]; then
-                    restart_cmd="cd ${abs_work_dir} && codex exec --full-auto --model ${z_model} \"\$(cat ${restart_prompt_file})\""
-                else
-                    restart_cmd="cd ${abs_work_dir} && ${z_cli} \"\$(cat ${restart_prompt_file})\""
-                fi
-
-                tmux new-session -d -s "$zombie_sess" -x 200 -y 50
-                tmux send-keys -t "$zombie_sess" "$restart_cmd" Enter
+            local restart_cmd
+            if [[ "$z_cli" == "claude" ]]; then
+                restart_cmd="cd ${abs_work_dir} && claude --dangerously-skip-permissions --model ${z_model} -p \"\$(cat ${restart_prompt_file})\""
+            elif [[ "$z_cli" == "codex" ]]; then
+                restart_cmd="cd ${abs_work_dir} && codex exec --full-auto --model ${z_model} \"\$(cat ${restart_prompt_file})\""
+            else
+                restart_cmd="cd ${abs_work_dir} && ${z_cli} \"\$(cat ${restart_prompt_file})\""
             fi
 
-            echo "[brain] $(date '+%H:%M:%S') → 🧟 ${target}: ${action}"
+            tmux new-session -d -s "$zombie_sess" -x 200 -y 50
+            tmux send-keys -t "$zombie_sess" "$restart_cmd" Enter
         fi
-    done
 
-    rm -f "$brain_prompt_file"
+        echo "[brain] $(date '+%H:%M:%S') → 🧟 ${target}: ${action_summary}"
+    done <<< "$queued_targets"
+
+    rm -f "$brain_prompt_file" "$brain_output_file"
 
     # Reset proactive timer
     date +%s > "$LAST_PROACTIVE_FILE"
@@ -565,9 +807,12 @@ echo "[nerve] Started — scan:${SCAN_INTERVAL}s proactive:$((PROACTIVE_INTERVAL
 echo "[nerve] Watching: ${BZ_DIR}/agents/*/STATUS.md"
 
 date +%s > "$LAST_PROACTIVE_FILE" 2>/dev/null || true
+ensure_brain_memory
 
 while true; do
     sync_status_from_worktrees 2>/dev/null || true
+    sync_memory_from_worktrees 2>/dev/null || true
+    control_plane sync-all --quiet >/dev/null 2>&1 || true
 
     # Skip everything if all done
     if all_done 2>/dev/null; then
@@ -585,6 +830,15 @@ while true; do
         wake_needed=1
         wake_reason="$changed"
         wake_mode="reactive"
+    fi
+
+    # CHECK 1.2: explicit zombie request for brain attention
+    if [[ "$wake_needed" -eq 0 ]]; then
+        if brain_requests="$(check_brain_requests 2>/dev/null)"; then
+            wake_needed=1
+            wake_reason="$brain_requests"
+            wake_mode="reactive"
+        fi
     fi
 
     # CHECK 2: Zombie crashed (tmux died)
