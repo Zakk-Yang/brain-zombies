@@ -84,6 +84,12 @@ agent_memory_file() {
     echo "${MEMORY_DIR}/$1_mem.md"
 }
 
+decision_fresh_for_status() {
+    local status_file="$1"
+    local decision_file="$2"
+    [[ -f "$status_file" && -f "$decision_file" && "$decision_file" -nt "$status_file" ]]
+}
+
 ensure_brain_memory() {
     if [[ ! -f "$BRAIN_MEMORY_FILE" ]]; then
         cat > "$BRAIN_MEMORY_FILE" <<'EOF'
@@ -656,11 +662,16 @@ check_pending_review() {
         local needs_brain
         needs_brain="$(status_field "${agent_dir}/STATUS.md" "Needs brain" | tr '[:upper:]' '[:lower:]')"
 
-        # ready-for-review always needs a fresh brain review; an old DECISION.md
-        # may be from a previous unblock/redirect and is not acceptance evidence.
+        local status_file="${agent_dir}/STATUS.md"
+        local decision_file="${agent_dir}/DECISION.md"
+
+        # ready-for-review needs a brain review unless the latest decision was
+        # written after the status. Older decisions may be previous unblocks.
         if [[ "$state" == "ready-for-review" || "$needs_brain" == "review" ]]; then
-            pending="${pending} ${agent_id}"
-        elif [[ "$state" == "done" && ! -f "${agent_dir}/DECISION.md" ]]; then
+            if ! decision_fresh_for_status "$status_file" "$decision_file"; then
+                pending="${pending} ${agent_id}"
+            fi
+        elif [[ "$state" == "done" && ! -f "$decision_file" ]]; then
             pending="${pending} ${agent_id}"
         fi
     done

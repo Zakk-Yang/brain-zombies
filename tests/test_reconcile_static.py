@@ -51,6 +51,7 @@ class ReconcileStaticTests(unittest.TestCase):
         ]
 
         self.assertIn('if [[ "$state" == "ready-for-review" || "$needs_brain" == "review" ]]', review_body)
+        self.assertIn('decision_fresh_for_status "$status_file" "$decision_file"', review_body)
         self.assertIn('pending="${pending} ${agent_id}"', review_body)
         self.assertNotIn('[[ ! -f "${agent_dir}/DECISION.md" ]]', review_body)
 
