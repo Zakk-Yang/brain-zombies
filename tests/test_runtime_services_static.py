@@ -27,6 +27,14 @@ class RuntimeServicesStaticTests(unittest.TestCase):
         self.assertIn('"tmux", "new-session", "-d", "-s", session', server)
         self.assertNotIn("subprocess.Popen(\n        [\"bash\", str(LIB_DIR / \"reconcile.sh\")", server)
 
+    def test_dashboard_preserves_message_log_scroll_on_refresh(self):
+        index = (REPO_ROOT / "dashboard" / "index.html").read_text()
+
+        self.assertIn('id="message-log-panel"', index)
+        self.assertIn("captureScrollState()", index)
+        self.assertIn("restoreScrollState(scrollState)", index)
+        self.assertIn("state.logPinnedToBottom", index)
+
 
 if __name__ == "__main__":
     unittest.main()

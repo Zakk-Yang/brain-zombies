@@ -1391,6 +1391,38 @@ function renderArtifactPanel(title, artifact, open = false) {
   `;
 }
 
+function captureScrollState() {
+  if (appState.mode !== "monitor") return null;
+  const logPanel = document.getElementById("message-log-panel");
+  const state = {
+    pageY: window.scrollY,
+    logTop: 0,
+    logPinnedToBottom: true,
+  };
+  if (logPanel) {
+    const distanceFromBottom = logPanel.scrollHeight - logPanel.clientHeight - logPanel.scrollTop;
+    state.logTop = logPanel.scrollTop;
+    state.logPinnedToBottom = distanceFromBottom <= 8;
+  }
+  return state;
+}
+
+function restoreScrollState(state) {
+  if (!state || appState.mode !== "monitor") return;
+  requestAnimationFrame(() => {
+    const logPanel = document.getElementById("message-log-panel");
+    if (logPanel) {
+      if (state.logPinnedToBottom) {
+        logPanel.scrollTop = logPanel.scrollHeight;
+      } else {
+        const maxTop = Math.max(0, logPanel.scrollHeight - logPanel.clientHeight);
+        logPanel.scrollTop = Math.min(state.logTop, maxTop);
+      }
+    }
+    window.scrollTo({ top: state.pageY, left: 0, behavior: "auto" });
+  });
+}
+
 function renderMonitor() {
   if (!appState.status) {
     return `
@@ -1503,7 +1535,7 @@ function renderMonitor() {
 
     <div class="zombie-grid">${zombiesHtml}</div>
 
-    <div class="log-panel">
+    <div class="log-panel" id="message-log-panel">
       <h2>Message Log</h2>
       <div id="log-entries">${messages}</div>
     </div>
@@ -1512,6 +1544,7 @@ function renderMonitor() {
 
 function render() {
   const content = document.getElementById("content");
+  const scrollState = captureScrollState();
   document.getElementById("reload-btn").disabled = appState.busy;
   document.getElementById("teardown-btn").disabled = appState.busy;
 
@@ -1526,10 +1559,12 @@ function render() {
         </div>
       </div>
     `;
+    restoreScrollState(scrollState);
     return;
   }
 
   content.innerHTML = appState.mode === "monitor" ? renderMonitor() : renderEditor();
+  restoreScrollState(scrollState);
 }
 
 document.addEventListener("click", (event) => {
