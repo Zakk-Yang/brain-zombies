@@ -105,6 +105,65 @@ class ProjectStateTests(unittest.TestCase):
             self.assertIn("## Project", context)
             self.assertIn("## Your Soul", context)
 
+    def test_brain_actions_are_recorded_in_agent_chatlog(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write_config(root)
+            project_init.initialize_project(root, auto_yes=True)
+
+            control_plane.queue_action(
+                root,
+                from_actor="brain",
+                to_agent="dev",
+                kind="unblock",
+                summary="Continue with the playable build.",
+                details="Start the game loop and verify the controls.",
+                reason="User reported the game could not start.",
+            )
+
+            chatlog = (root / ".bz/project/chatlogs/brain_dev_chatlog.md").read_text()
+            self.assertIn(" - Brain", chatlog)
+            self.assertIn("[unblock] Continue with the playable build.", chatlog)
+            self.assertIn("Reason: User reported the game could not start.", chatlog)
+            self.assertIn("Start the game loop and verify the controls.", chatlog)
+
+    def test_zombie_attention_state_is_recorded_in_agent_chatlog_once(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write_config(root)
+            project_init.initialize_project(root, auto_yes=True)
+
+            status_path = root / ".bz/agents/dev/STATUS.md"
+            status_path.write_text(
+                "\n".join(
+                    [
+                        "# STATUS.md",
+                        "State: ready-for-review",
+                        "Action: waiting for visual review",
+                        "Summary: Playable build is ready.",
+                        "Files touched: src/game.js",
+                        "Depends on: none",
+                        "Needs brain: review",
+                        "Next step: Brain should verify playability and visual design.",
+                        "Blocker: none",
+                        "Memory: .bz/project/memories/dev_mem.md",
+                        "Updated by: agent",
+                        "Last updated: 2026-04-15 12:00",
+                        "",
+                    ]
+                )
+            )
+
+            control_plane.sync_agent_from_status(root, "dev")
+            control_plane.sync_agent_from_status(root, "dev")
+
+            chatlog = (root / ".bz/project/chatlogs/brain_dev_chatlog.md").read_text()
+            self.assertIn(" - dev", chatlog)
+            self.assertIn("State: ready-for-review", chatlog)
+            self.assertIn("Needs brain: review", chatlog)
+            self.assertIn("Brain should verify playability and visual design.", chatlog)
+            self.assertEqual(chatlog.count("Needs brain: review"), 1)
+
     def test_stale_agents_uses_heartbeat_timestamp(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

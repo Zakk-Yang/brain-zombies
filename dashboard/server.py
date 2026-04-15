@@ -1628,7 +1628,6 @@ Rules:
     for target in queued_targets:
         _resume_target_from_brain_chat(target)
         delivery[target] = _deliver_action_to_agent(target)
-        append_chatlog(brain_agent_chatlog_path(PROJECT_ROOT, target), "Brain", control_plane.action_summary(control_plane.latest_pending_action(PROJECT_ROOT, target) or {}))
 
     reconcile_started = False
     if queued_targets:

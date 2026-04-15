@@ -26,6 +26,7 @@ from project_layout import (
     agent_output_dir,
     agent_plan_path,
     agent_soul_path,
+    brain_agent_chatlog_path,
     brain_memory_path as project_brain_memory_path,
     brain_output_dir,
     brain_soul_path,
@@ -324,6 +325,111 @@ def write_text_and_mirror(root: Path, agent_id: str, rel_path: str, content: str
         mirror_path.write_text(content)
 
 
+def actor_display_name(actor: str) -> str:
+    labels = {
+        "brain": "Brain",
+        "human": "Human",
+        "system": "System",
+        "reconcile": "Reconcile",
+    }
+    key = flatten_text(actor).lower()
+    if key in labels:
+        return labels[key]
+    if key.startswith("agent:"):
+        return key.split(":", 1)[1]
+    return flatten_text(actor) or "Unknown"
+
+
+def append_chatlog(
+    path: Path,
+    speaker: str,
+    message: str,
+    timestamp: str | None = None,
+    dedupe_text: str = "",
+) -> bool:
+    ensure_parent(path)
+    body = message.strip()
+    if dedupe_text and path.exists():
+        try:
+            if dedupe_text.strip() in path.read_text(errors="replace")[-12000:]:
+                return False
+        except OSError:
+            pass
+    display = iso_to_display(timestamp) if timestamp else now_display()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n## {display} - {speaker}\n\n{body}\n")
+    return True
+
+
+def append_brain_agent_chatlog(
+    root: Path,
+    agent_id: str,
+    speaker: str,
+    message: str,
+    timestamp: str | None = None,
+    dedupe_text: str = "",
+) -> None:
+    path = brain_agent_chatlog_path(root, agent_id)
+    append_chatlog(path, speaker, message, timestamp=timestamp, dedupe_text=dedupe_text)
+    mirror_path = worktree_mirror_path(root, agent_id, rel_to_root(root, path))
+    if mirror_path is not None:
+        append_chatlog(
+            mirror_path,
+            speaker,
+            message,
+            timestamp=timestamp,
+            dedupe_text=dedupe_text,
+        )
+
+
+NO_ATTENTION_VALUES = {"", "no", "none", "n/a", "na", "false"}
+ATTENTION_PHASES = {"ready-for-review", "blocked", "crashed", "done"}
+
+
+def state_has_brain_attention(state: dict[str, Any]) -> bool:
+    needs_brain = flatten_text(state.get("needs_brain")).lower()
+    blocker = flatten_text(state.get("blocker")).lower()
+    phase = normalize_phase(state.get("phase"))
+    return (
+        needs_brain not in NO_ATTENTION_VALUES
+        or blocker not in NO_ATTENTION_VALUES
+        or phase in ATTENTION_PHASES
+    )
+
+
+def state_chatlog_message(state: dict[str, Any]) -> str:
+    files_touched = state.get("files_touched", [])
+    lines = [
+        f"State: {state.get('phase', 'unknown')}",
+        f"Action: {state.get('action', 'waiting for next step')}",
+        f"Summary: {state.get('summary', '') or 'No summary.'}",
+        f"Needs brain: {state.get('needs_brain', 'no') or 'no'}",
+        f"Next step: {state.get('next_step', '') or 'none'}",
+        f"Blocker: {state.get('blocker', 'none') or 'none'}",
+        f"Files touched: {csv_or_none(files_touched)}",
+    ]
+    return "\n".join(lines)
+
+
+def append_state_chatlog_if_needed(root: Path, state: dict[str, Any]) -> None:
+    agent_id = state.get("agent_id", "")
+    if not agent_id or agent_id == "supervisor":
+        return
+    if flatten_text(state.get("updated_by")).lower() == "brain":
+        return
+    if not state_has_brain_attention(state):
+        return
+    message = state_chatlog_message(state)
+    append_brain_agent_chatlog(
+        root,
+        agent_id,
+        actor_display_name(f"agent:{agent_id}"),
+        message,
+        timestamp=state.get("updated_at"),
+        dedupe_text=message,
+    )
+
+
 def append_event(
     root: Path,
     event_type: str,
@@ -412,6 +518,7 @@ def sync_agent_from_status(root: Path, agent_id: str) -> dict[str, Any]:
     state["action"] = state["action"] or "waiting for next step"
     state["summary"] = state["summary"] or "No summary."
     save_state(root, agent_id, state)
+    append_state_chatlog_if_needed(root, state)
     return state
 
 
@@ -454,6 +561,7 @@ def write_state(
         "source": source,
     }
     save_state(root, agent_id, state)
+    append_state_chatlog_if_needed(root, state)
     append_event(
         root,
         event_type="state_changed",
@@ -570,6 +678,17 @@ def queue_action(
     write_text_and_mirror(root, to_agent, f".bz/control/agents/{to_agent}/latest-action.md", action_markdown)
     if from_actor == "brain":
         write_text_and_mirror(root, to_agent, f".bz/agents/{to_agent}/DECISION.md", action_markdown)
+    chat_parts = [action_summary(action)]
+    if action["reason"]:
+        chat_parts.extend(["", f"Reason: {action['reason']}"])
+    chat_parts.extend(["", action["details"] or "(no details)"])
+    append_brain_agent_chatlog(
+        root,
+        to_agent,
+        actor_display_name(from_actor),
+        "\n".join(chat_parts),
+        timestamp=action["created_at"],
+    )
     append_event(
         root,
         event_type="action_queued",
