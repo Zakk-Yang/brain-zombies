@@ -10,12 +10,15 @@ class RuntimeServicesStaticTests(unittest.TestCase):
         script = (REPO_ROOT / "bz").read_text()
 
         self.assertIn('start_reconcile_loop "${project_root_abs}"', script)
+        self.assertIn("cmd_dashboard", script)
         self.assertIn('session_name "nerve"', script)
         self.assertIn('session_name "dashboard"', script)
         self.assertIn("tmux new-session -d -s \"$reconcile_session\"", script)
         self.assertIn("tmux new-session -d -s \"$dashboard_session\"", script)
+        self.assertIn('if [[ "$auto_dashboard" -eq 1 ]]; then', script)
         self.assertNotIn('nohup bash "${SCRIPT_DIR}/lib/reconcile.sh"', script)
         self.assertNotIn('nohup python3 "${SCRIPT_DIR}/dashboard/server.py"', script)
+        self.assertNotIn("Start dashboard? [Y/n]", script)
 
     def test_dashboard_restarts_reconcile_under_tmux(self):
         server = (REPO_ROOT / "dashboard" / "server.py").read_text()

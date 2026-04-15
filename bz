@@ -312,11 +312,14 @@ sync_agent_protocol_to_worktree() {
 cmd_new() {
     local brief_file=""
     local auto_yes=0
+    local auto_dashboard=1
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --brief|-b) brief_file="$2"; shift 2 ;;
             -y) auto_yes=1; shift ;;
+            --dashboard) auto_dashboard=1; shift ;;
+            --no-dashboard) auto_dashboard=0; shift ;;
             *) err "Unknown option: $1"; exit 1 ;;
         esac
     done
@@ -412,22 +415,30 @@ cmd_new() {
     cat bz.yaml
     echo ""
 
+    local launched=0
     if [[ "$auto_yes" -eq 0 ]]; then
         printf "Launch now? [Y/n]: "
         read -r answer
-        [[ "$answer" =~ ^[Nn] ]] || cmd_launch
+        if [[ ! "$answer" =~ ^[Nn] ]]; then
+            launched=1
+            cmd_launch
+        fi
+    fi
+
+    if [[ "$auto_dashboard" -eq 1 && "$launched" -eq 0 ]]; then
+        cmd_dashboard
     fi
 }
 
 # ── LAUNCH ───────────────────────────────────────
 
 cmd_launch() {
-    local auto_dashboard_prompt=1
+    local auto_dashboard=1
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --no-dashboard) auto_dashboard_prompt=0; shift ;;
-            --dashboard) auto_dashboard_prompt=1; shift ;;
+            --no-dashboard) auto_dashboard=0; shift ;;
+            --dashboard) auto_dashboard=1; shift ;;
             *) err "Unknown launch option: $1"; exit 1 ;;
         esac
     done
@@ -800,13 +811,8 @@ START NOW."
     echo "  ${GREEN}${BOLD}Agents launched!${NC}"
     echo ""
 
-    if [[ "$auto_dashboard_prompt" -eq 1 ]]; then
-        # Offer dashboard
-        printf "  Start dashboard? [Y/n]: "
-        read -r dash_answer
-        if [[ ! "$dash_answer" =~ ^[Nn] ]]; then
-            cmd_dashboard
-        fi
+    if [[ "$auto_dashboard" -eq 1 ]]; then
+        cmd_dashboard
     fi
 
     echo ""
