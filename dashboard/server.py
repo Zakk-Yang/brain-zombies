@@ -732,13 +732,15 @@ def get_phase(state, agent_id=None):
         "ready-for-review": "ready-for-review",
     }
 
-    if state in ("done", "ready-for-review", "finished") and agent_id:
+    if state == "ready-for-review":
+        return "ready-for-review"
+    if state in ("done", "finished") and agent_id:
         decision_file = BZ_DIR / "agents" / agent_id / "DECISION.md"
         if decision_file.exists():
             content = decision_file.read_text().lower()
-            if any(word in content for word in ["accept", "complete", "proceed", "unblock", "done"]):
+            if any(word in content for word in ["accept", "complete", "done"]):
                 return "finished"
-        return "ready-for-review" if state == "ready-for-review" else "done"
+        return "finished" if state == "finished" else "done"
     if state == "done":
         return "done"
     if state == "finished":

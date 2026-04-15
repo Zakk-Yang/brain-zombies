@@ -294,12 +294,19 @@ all_done() {
 
         local state
         state="$(status_field "${agent_dir}/STATUS.md" "State")"
-        # Must be done AND have brain confirmation
-        if [[ "$state" != "done" && "$state" != "finished" && "$state" != "ready-for-review" ]]; then
+        # Only brain-confirmed terminal states can finish the whole run.
+        if [[ "$state" != "done" && "$state" != "finished" ]]; then
             return 1
         fi
-        if [[ "$state" == "ready-for-review" && ! -f "${agent_dir}/DECISION.md" ]]; then
-            return 1  # brain hasn't confirmed
+
+        local needs_brain blocker
+        needs_brain="$(status_field "${agent_dir}/STATUS.md" "Needs brain" | tr '[:upper:]' '[:lower:]')"
+        blocker="$(status_field "${agent_dir}/STATUS.md" "Blocker" | tr '[:upper:]' '[:lower:]')"
+        if [[ -n "$needs_brain" && "$needs_brain" != "no" && "$needs_brain" != "none" ]]; then
+            return 1
+        fi
+        if [[ -n "$blocker" && "$blocker" != "no" && "$blocker" != "none" ]]; then
+            return 1
         fi
     done
     [[ "$has_agents" -eq 1 ]] && return 0 || return 1
@@ -327,7 +334,7 @@ shutdown_finished_run() {
 
     for sess in $(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^bz-${PROJECT_NAME}-" || true); do
         case "$sess" in
-            *-supervisor) ;;
+            *-supervisor|*-dashboard|*-nerve) ;;
             *)
                 for pane_pid in $(tmux list-panes -t "$sess" -F '#{pane_pid}' 2>/dev/null); do
                     pkill -TERM -P "$pane_pid" 2>/dev/null || true
@@ -408,6 +415,98 @@ sync_outputs_to_worktrees() {
     done
 }
 
+is_framework_path() {
+    local rel="${1#./}"
+    case "$rel" in
+        ""|.bz|.bz/*|.git|.git/*|.codex|.codex/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+project_base_ref() {
+    local base
+    base="$(git -C "$PROJECT_ROOT" symbolic-ref --short HEAD 2>/dev/null || true)"
+    [[ -n "$base" ]] || base="master"
+    echo "$base"
+}
+
+worktree_changed_files() {
+    local wt="$1"
+    [[ -d "$wt" ]] || return 0
+
+    local base_ref
+    base_ref="$(project_base_ref)"
+    {
+        git -C "$wt" diff --name-only --diff-filter=ACMRT HEAD 2>/dev/null || true
+        git -C "$wt" diff --name-only --diff-filter=ACMRT "${base_ref}...HEAD" 2>/dev/null || true
+        git -C "$wt" ls-files --others --exclude-standard 2>/dev/null || true
+    } | sort -u
+}
+
+worktree_deliverable_files() {
+    local wt="$1"
+    worktree_changed_files "$wt" | while IFS= read -r rel; do
+        rel="${rel#./}"
+        [[ -n "$rel" ]] || continue
+        is_framework_path "$rel" && continue
+        [[ -f "${wt}/${rel}" ]] || continue
+        printf '%s\n' "$rel"
+    done
+}
+
+worktree_has_changes() {
+    local wt="$1"
+    [[ -n "$(worktree_changed_files "$wt" | head -1)" ]]
+}
+
+promote_worktree_deliverables() {
+    local agent_id="$1"
+    local wt="${BZ_DIR}/worktrees/${agent_id}"
+    [[ -d "$wt" ]] || return 0
+
+    local promoted=0
+    local rel
+    while IFS= read -r rel; do
+        local src="${wt}/${rel}"
+        local dest="${PROJECT_ROOT}/${rel}"
+        [[ -f "$src" ]] || continue
+        if [[ -f "$dest" ]] && cmp -s "$src" "$dest"; then
+            continue
+        fi
+        mkdir -p "$(dirname "$dest")"
+        cp "$src" "$dest"
+        promoted=$((promoted + 1))
+        log "Promoted ${agent_id} deliverable: ${rel}"
+    done < <(worktree_deliverable_files "$wt")
+
+    if [[ "$promoted" -gt 0 ]]; then
+        control_plane record-event \
+            --type deliverables_promoted \
+            --source reconcile \
+            --summary "Promoted ${promoted} root deliverable(s) from ${agent_id}." \
+            --details "Copied accepted non-.bz files from ${wt} into ${PROJECT_ROOT}." >/dev/null 2>&1 || true
+    fi
+}
+
+promote_done_worktrees() {
+    for agent_dir in "${BZ_DIR}/agents"/*/; do
+        [[ -d "$agent_dir" ]] || continue
+        local agent_id
+        agent_id="$(basename "$agent_dir")"
+        [[ "$agent_id" == "supervisor" ]] && continue
+
+        local state needs_brain blocker
+        state="$(status_field "${agent_dir}/STATUS.md" "State")"
+        needs_brain="$(status_field "${agent_dir}/STATUS.md" "Needs brain" | tr '[:upper:]' '[:lower:]')"
+        blocker="$(status_field "${agent_dir}/STATUS.md" "Blocker" | tr '[:upper:]' '[:lower:]')"
+        [[ "$state" == "done" || "$state" == "finished" ]] || continue
+        [[ -z "$needs_brain" || "$needs_brain" == "no" || "$needs_brain" == "none" ]] || continue
+        [[ -z "$blocker" || "$blocker" == "no" || "$blocker" == "none" ]] || continue
+
+        promote_worktree_deliverables "$agent_id"
+    done
+}
+
 # ── Wake Triggers (FREE — just bash checks) ─────
 
 # Check 1: STATUS.md content changed
@@ -448,8 +547,8 @@ check_hallucination() {
         # Only check agents claiming completion
         [[ "$state" != "done" && "$state" != "ready-for-review" ]] && continue
 
-        # Already verified by brain (has DECISION.md)
-        [[ -f "${agent_dir}/DECISION.md" ]] && continue
+        # Brain-accepted done work should not be re-opened by this heuristic.
+        [[ "$state" == "done" && -f "${agent_dir}/DECISION.md" ]] && continue
 
         # Check git diff in worktree — should have commits beyond main
         local wt="${BZ_DIR}/worktrees/${agent_id}"
@@ -459,7 +558,7 @@ check_hallucination() {
             local wt_head
             wt_head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo "")"
 
-            if [[ -n "$main_head" && "$main_head" == "$wt_head" ]]; then
+            if [[ -n "$main_head" && "$main_head" == "$wt_head" ]] && ! worktree_has_changes "$wt"; then
                 # Zero commits beyond main — agent is lying
                 local files_touched
                 files_touched="$(grep '^Files touched:' "${agent_dir}/STATUS.md" 2>/dev/null | head -1 | sed 's/Files touched: //')"
@@ -557,11 +656,12 @@ check_pending_review() {
         local needs_brain
         needs_brain="$(status_field "${agent_dir}/STATUS.md" "Needs brain" | tr '[:upper:]' '[:lower:]')"
 
-        # Zombie says done or ready-for-review but no DECISION.md from brain
-        if [[ "$state" == "done" || "$state" == "ready-for-review" || "$needs_brain" == "review" ]]; then
-            if [[ ! -f "${agent_dir}/DECISION.md" ]]; then
-                pending="${pending} ${agent_id}"
-            fi
+        # ready-for-review always needs a fresh brain review; an old DECISION.md
+        # may be from a previous unblock/redirect and is not acceptance evidence.
+        if [[ "$state" == "ready-for-review" || "$needs_brain" == "review" ]]; then
+            pending="${pending} ${agent_id}"
+        elif [[ "$state" == "done" && ! -f "${agent_dir}/DECISION.md" ]]; then
+            pending="${pending} ${agent_id}"
         fi
     done
 
@@ -587,23 +687,61 @@ $(cat "${agent_dir}/STATUS.md")"
 
     # Git log (commits by this agent)
     if [[ -d "$wt/.git" ]] || [[ -f "$wt/.git" ]]; then
+        local git_status
+        git_status="$(git -C "$wt" status --short 2>/dev/null | head -80)"
+        if [[ -n "$git_status" ]]; then
+            work="${work}
+
+--- Worktree status ---
+${git_status}"
+        fi
+
         local branch_commits
-        branch_commits="$(git -C "$wt" log --oneline "master..HEAD" 2>/dev/null | head -20)"
+        local base_ref
+        base_ref="$(project_base_ref)"
+        branch_commits="$(git -C "$wt" log --oneline "${base_ref}..HEAD" 2>/dev/null | head -20)"
         if [[ -n "$branch_commits" ]]; then
             work="${work}
 
---- Git commits (branch vs master) ---
+--- Git commits (branch vs ${base_ref}) ---
 ${branch_commits}"
         fi
 
         # Git diff stat
         local diff_stat
-        diff_stat="$(git -C "$wt" diff --stat master 2>/dev/null | tail -5)"
+        diff_stat="$(git -C "$wt" diff --stat "$base_ref" 2>/dev/null | tail -5)"
         if [[ -n "$diff_stat" ]]; then
             work="${work}
 
 --- Files changed ---
 ${diff_stat}"
+        fi
+
+        local deliverables
+        deliverables="$(worktree_deliverable_files "$wt" | head -30)"
+        if [[ -n "$deliverables" ]]; then
+            work="${work}
+
+--- Candidate root deliverables ---
+${deliverables}"
+            while IFS= read -r rel; do
+                [[ -f "${wt}/${rel}" ]] || continue
+                local byte_count
+                byte_count="$(wc -c < "${wt}/${rel}" 2>/dev/null || echo 0)"
+                if [[ "$byte_count" -le 20000 ]] && grep -Iq . "${wt}/${rel}" 2>/dev/null; then
+                    local file_excerpt
+                    file_excerpt="$(head -80 "${wt}/${rel}")"
+                    work="${work}
+
+--- ${rel} (first 80 lines) ---
+${file_excerpt}"
+                else
+                    work="${work}
+
+--- ${rel} ---
+[${byte_count} bytes; binary or large content omitted]"
+                fi
+            done <<< "$deliverables"
         fi
     fi
 
@@ -722,6 +860,8 @@ ${review_details}"
 Rules:
 - actions must be [] if no zombie intervention is needed
 - use kind=accept only when review evidence is good enough to mark the zombie done
+- for root project deliverables, review Candidate root deliverables and Worktree status; reconcile promotes non-.bz files only after accept
+- do not accept when STATUS has a non-none Blocker or the claimed implementation files are missing from the review evidence
 - keep brain_memory compact and durable
 - do not include markdown fences or any text before/after the JSON object'
 
@@ -893,6 +1033,7 @@ while true; do
     sync_outputs_from_worktrees 2>/dev/null || true
     sync_outputs_to_worktrees 2>/dev/null || true
     control_plane sync-all --quiet >/dev/null 2>&1 || true
+    promote_done_worktrees 2>/dev/null || true
 
     # Stop background work once every zombie is brain-confirmed finished.
     if all_done 2>/dev/null; then

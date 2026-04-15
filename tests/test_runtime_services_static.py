@@ -35,6 +35,14 @@ class RuntimeServicesStaticTests(unittest.TestCase):
         self.assertIn("restoreScrollState(scrollState)", index)
         self.assertIn("state.logPinnedToBottom", index)
 
+    def test_dashboard_does_not_treat_ready_for_review_as_finished(self):
+        server = (REPO_ROOT / "dashboard" / "server.py").read_text()
+        phase_body = server[server.index("def get_phase(") : server.index("def get_token_usage")]
+
+        self.assertIn('if state == "ready-for-review":', phase_body)
+        self.assertIn('return "ready-for-review"', phase_body)
+        self.assertNotIn('"proceed", "unblock"', phase_body)
+
 
 if __name__ == "__main__":
     unittest.main()
