@@ -376,6 +376,38 @@ sync_memory_from_worktrees() {
     done
 }
 
+sync_outputs_from_worktrees() {
+    for wt in "${BZ_DIR}/worktrees"/*; do
+        [[ -d "$wt" ]] || continue
+        for wt_output in "$wt"/".bz/project/outputs"/*/*; do
+            [[ -f "$wt_output" ]] || continue
+            local rel_path main_output
+            rel_path="${wt_output#${wt}/}"
+            main_output="${PROJECT_ROOT}/${rel_path}"
+            if [[ ! -f "$main_output" || "$wt_output" -nt "$main_output" ]]; then
+                mkdir -p "$(dirname "$main_output")"
+                cp "$wt_output" "$main_output"
+            fi
+        done
+    done
+}
+
+sync_outputs_to_worktrees() {
+    for wt in "${BZ_DIR}/worktrees"/*; do
+        [[ -d "$wt" ]] || continue
+        for main_output in "${PROJECT_STATE_DIR}/outputs"/*/*; do
+            [[ -f "$main_output" ]] || continue
+            local rel_path wt_output
+            rel_path="${main_output#${PROJECT_ROOT}/}"
+            wt_output="${wt}/${rel_path}"
+            if [[ ! -f "$wt_output" || "$main_output" -nt "$wt_output" ]]; then
+                mkdir -p "$(dirname "$wt_output")"
+                cp "$main_output" "$wt_output"
+            fi
+        done
+    done
+}
+
 # ── Wake Triggers (FREE — just bash checks) ─────
 
 # Check 1: STATUS.md content changed
@@ -858,6 +890,8 @@ ensure_brain_memory
 while true; do
     sync_status_from_worktrees 2>/dev/null || true
     sync_memory_from_worktrees 2>/dev/null || true
+    sync_outputs_from_worktrees 2>/dev/null || true
+    sync_outputs_to_worktrees 2>/dev/null || true
     control_plane sync-all --quiet >/dev/null 2>&1 || true
 
     # Stop background work once every zombie is brain-confirmed finished.

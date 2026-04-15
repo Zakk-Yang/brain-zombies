@@ -16,6 +16,15 @@ class ReconcileStaticTests(unittest.TestCase):
         self.assertIn("shutdown_finished_run", script)
         self.assertIn("exit 0", script)
 
+    def test_reconcile_syncs_project_outputs_across_worktrees(self):
+        script = (REPO_ROOT / "lib" / "reconcile.sh").read_text()
+
+        self.assertIn("sync_outputs_from_worktrees()", script)
+        self.assertIn("sync_outputs_to_worktrees()", script)
+        self.assertIn('sync_outputs_from_worktrees 2>/dev/null || true', script)
+        self.assertIn('sync_outputs_to_worktrees 2>/dev/null || true', script)
+        self.assertIn('"${PROJECT_STATE_DIR}/outputs"/*/*', script)
+
 
 if __name__ == "__main__":
     unittest.main()
