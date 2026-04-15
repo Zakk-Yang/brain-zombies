@@ -106,6 +106,26 @@ class Ledger:
         self.save()
 
 
+def _resolve_brief_path(brief_path: str, project_dir: Path) -> Path:
+    path = Path(brief_path).expanduser()
+    resolved = path if path.is_absolute() else (project_dir / path)
+    resolved = resolved.resolve()
+
+    if not resolved.exists():
+        raise ValueError(f"--brief file not found: {brief_path} (resolved to {resolved})")
+    if not resolved.is_file():
+        raise ValueError(f"--brief must point to a file: {resolved}")
+    return resolved
+
+
+def _load_brief_text(brief_path: str, project_dir: Optional[str]) -> str:
+    resolved = _resolve_brief_path(brief_path, Path(project_dir or os.getcwd()).resolve())
+    try:
+        return resolved.read_text()
+    except OSError as exc:
+        raise ValueError(f"Cannot read --brief file {resolved}: {exc}") from exc
+
+
 # ── Main Loop ────────────────────────────────────────────────
 
 
@@ -123,6 +143,7 @@ class IterateLoop:
         self.ledger = Ledger(self.iterate_dir / "ledger.json")
         self.last_good_commit: str = ""
         self.verbose = args.verbose
+        self.brief = getattr(args, "brief_text", "")
 
     # ── Public ───────────────────────────────────────
 
@@ -301,10 +322,14 @@ class IterateLoop:
         champ = self.ledger.champion
         cf = self.ledger.consecutive_failures()
 
+        brief_section = ""
+        if self.brief:
+            brief_section = f"\nRESEARCH BRIEF (use for inspiration — specific formulas and ideas):\n{self.brief}\n"
+
         prompt = f"""You are an autonomous research agent improving a system iteratively.
 
 GOAL: {goal_desc}
-
+{brief_section}
 CURRENT CHAMPION (iteration {champ.get('iteration', 0)}):
 {json.dumps(champ.get('metrics', {}), indent=2)}
 
@@ -669,10 +694,16 @@ Examples:
                     help="Zombie model (default: sonnet)")
     ap.add_argument("--project-dir",
                     help="Project directory (default: cwd)")
+    ap.add_argument("--brief",
+                    help="Path to research brief file (absolute or relative to --project-dir)")
     ap.add_argument("--verbose", action="store_true",
                     help="Show runner stderr on failure")
 
     args = ap.parse_args()
+    try:
+        args.brief_text = _load_brief_text(args.brief, args.project_dir) if args.brief else ""
+    except ValueError as exc:
+        ap.error(str(exc))
     IterateLoop(args).run()
 
 

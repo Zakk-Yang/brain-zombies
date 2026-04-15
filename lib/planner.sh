@@ -25,6 +25,8 @@ $(echo "$brief" | sed 's/^/    /')
 supervisor:
   runtime: "${cli_cmd}"
   model: "${supervisor_model}"
+  proactive_check_mins: 15
+  zombie_heartbeat_mins: 10
 
 agents:
   - id: "researcher"

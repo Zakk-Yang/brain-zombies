@@ -7,5 +7,5 @@ Depends on: none
 Needs brain: no
 Next step: Read BRIEF.md and begin task.
 Blocker: none
-Memory: .bz/memory/agents/AGENT_ID.md
+Memory: .bz/project/memories/AGENT_ID_mem.md
 Last updated: TIMESTAMP

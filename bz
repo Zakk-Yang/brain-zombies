@@ -101,6 +101,43 @@ session_name() {
     echo "bz-$(project_name)-$1"
 }
 
+shell_quote() {
+    printf '%q' "$1"
+}
+
+kill_tmux_session_tree() {
+    local sess="$1"
+
+    for pane_pid in $(tmux list-panes -t "$sess" -F '#{pane_pid}' 2>/dev/null); do
+        pkill -TERM -P "$pane_pid" 2>/dev/null || true
+        for child in $(pgrep -P "$pane_pid" 2>/dev/null); do
+            pkill -TERM -P "$child" 2>/dev/null || true
+        done
+    done
+
+    tmux kill-session -t "$sess" 2>/dev/null || true
+}
+
+start_reconcile_loop() {
+    local project_root_abs="$1"
+    local reconcile_pid_file="${BZ_DIR}/reconcile.pid"
+    local reconcile_log_file="${BZ_DIR}/logs/reconcile.log"
+    local reconcile_session
+    reconcile_session="$(session_name "nerve")"
+
+    mkdir -p "${BZ_DIR}/logs"
+    if [[ -f "$reconcile_pid_file" ]]; then
+        kill "$(cat "$reconcile_pid_file")" 2>/dev/null || true
+        rm -f "$reconcile_pid_file"
+    fi
+    kill_tmux_session_tree "$reconcile_session"
+
+    local cmd
+    cmd="cd $(shell_quote "$project_root_abs") && echo \$\$ > $(shell_quote "$reconcile_pid_file") && exec bash $(shell_quote "${SCRIPT_DIR}/lib/reconcile.sh") $(shell_quote "$project_root_abs") >> $(shell_quote "$reconcile_log_file") 2>&1"
+    tmux new-session -d -s "$reconcile_session" -x 160 -y 40 "$cmd"
+    ok "Reconcile loop started → tmux: ${reconcile_session}"
+}
+
 worktree_path() {
     echo "${BZ_DIR}/worktrees/$1"
 }
@@ -125,7 +162,35 @@ EOF
 }
 
 agent_memory_relpath() {
-    echo "${BZ_DIR}/memory/agents/$1.md"
+    echo "${BZ_DIR}/project/memories/$1_mem.md"
+}
+
+brain_memory_relpath() {
+    echo "${BZ_DIR}/project/memories/brain_mem.md"
+}
+
+shared_memory_relpath() {
+    echo "${BZ_DIR}/project/memories/shared_mem.md"
+}
+
+agent_soul_relpath() {
+    echo "${BZ_DIR}/project/souls/$1_soul.md"
+}
+
+brain_soul_relpath() {
+    echo "${BZ_DIR}/project/souls/brain_soul.md"
+}
+
+agent_plan_relpath() {
+    echo "${BZ_DIR}/project/plans/$1_plan.md"
+}
+
+project_doc_relpath() {
+    echo "${BZ_DIR}/project/PROJECT.md"
+}
+
+target_doc_relpath() {
+    echo "${BZ_DIR}/project/TARGET.md"
 }
 
 status_field() {
@@ -165,6 +230,7 @@ EOF
 write_agent_memory_file() {
     local path="$1"
     local agent_id="$2"
+    [[ -f "$path" ]] && return 0
 
     cat > "$path" <<EOF
 # Agent Memory: ${agent_id}
@@ -185,6 +251,7 @@ EOF
 
 write_brain_memory_file() {
     local path="$1"
+    [[ -f "$path" ]] && return 0
 
     cat > "$path" <<'EOF'
 # Brain Memory
@@ -209,6 +276,13 @@ sync_agent_protocol_to_worktree() {
     mkdir -p \
         "${wt_path}/${BZ_DIR}/agents/${agent_id}" \
         "${wt_path}/${BZ_DIR}/memory/agents" \
+        "${wt_path}/${BZ_DIR}/project/souls" \
+        "${wt_path}/${BZ_DIR}/project/memories" \
+        "${wt_path}/${BZ_DIR}/project/plans" \
+        "${wt_path}/${BZ_DIR}/project/outputs/brain" \
+        "${wt_path}/${BZ_DIR}/project/outputs/${agent_id}" \
+        "${wt_path}/${BZ_DIR}/project/chatlogs" \
+        "${wt_path}/${BZ_DIR}/project/scheduler" \
         "${wt_path}/${BZ_DIR}/control/agents/${agent_id}" \
         "${wt_path}/${BZ_DIR}/control/contexts" \
         "${wt_path}/${BZ_DIR}/bin"
@@ -219,8 +293,15 @@ sync_agent_protocol_to_worktree() {
     [[ -f "${BZ_DIR}/agents/${agent_id}/BRIEF.md" ]] && cp "${BZ_DIR}/agents/${agent_id}/BRIEF.md" "${wt_path}/${BZ_DIR}/agents/${agent_id}/BRIEF.md"
     [[ -f "${BZ_DIR}/agents/${agent_id}/STATUS.md" ]] && cp "${BZ_DIR}/agents/${agent_id}/STATUS.md" "${wt_path}/${BZ_DIR}/agents/${agent_id}/STATUS.md"
     [[ -f "${BZ_DIR}/agents/${agent_id}/DECISION.md" ]] && cp "${BZ_DIR}/agents/${agent_id}/DECISION.md" "${wt_path}/${BZ_DIR}/agents/${agent_id}/DECISION.md"
-    [[ -f "${BZ_DIR}/memory/brain.md" ]] && cp "${BZ_DIR}/memory/brain.md" "${wt_path}/${BZ_DIR}/memory/brain.md"
+    [[ -f "$(project_doc_relpath)" ]] && cp "$(project_doc_relpath)" "${wt_path}/$(project_doc_relpath)"
+    [[ -f "$(target_doc_relpath)" ]] && cp "$(target_doc_relpath)" "${wt_path}/$(target_doc_relpath)"
+    [[ -f "$(brain_soul_relpath)" ]] && cp "$(brain_soul_relpath)" "${wt_path}/$(brain_soul_relpath)"
+    [[ -f "$(agent_soul_relpath "$agent_id")" ]] && cp "$(agent_soul_relpath "$agent_id")" "${wt_path}/$(agent_soul_relpath "$agent_id")"
+    [[ -f "$(brain_memory_relpath)" ]] && cp "$(brain_memory_relpath)" "${wt_path}/$(brain_memory_relpath)"
+    [[ -f "$(shared_memory_relpath)" ]] && cp "$(shared_memory_relpath)" "${wt_path}/$(shared_memory_relpath)"
     [[ -f "${rel_memory}" ]] && cp "${rel_memory}" "${wt_path}/${rel_memory}"
+    [[ -f "$(agent_plan_relpath "$agent_id")" ]] && cp "$(agent_plan_relpath "$agent_id")" "${wt_path}/$(agent_plan_relpath "$agent_id")"
+    [[ -f "${BZ_DIR}/project/scheduler/policy.yaml" ]] && cp "${BZ_DIR}/project/scheduler/policy.yaml" "${wt_path}/${BZ_DIR}/project/scheduler/policy.yaml"
     [[ -f "${BZ_DIR}/control/contexts/${agent_id}.md" ]] && cp "${BZ_DIR}/control/contexts/${agent_id}.md" "${wt_path}/${BZ_DIR}/control/contexts/${agent_id}.md"
     [[ -f "${BZ_DIR}/control/agents/${agent_id}/latest-action.md" ]] && cp "${BZ_DIR}/control/agents/${agent_id}/latest-action.md" "${wt_path}/${BZ_DIR}/control/agents/${agent_id}/latest-action.md"
     [[ -f "${BZ_DIR}/bin/bzctl" ]] && cp "${BZ_DIR}/bin/bzctl" "${wt_path}/${BZ_DIR}/bin/bzctl"
@@ -323,6 +404,10 @@ cmd_new() {
     generate_config "$brief" "$cli_cmd" "$supervisor_model" "$agent_model" "$git_strategy"
 
     ok "Generated bz.yaml"
+    local init_args=(--project-root "$(pwd -P)")
+    [[ "$auto_yes" -eq 1 ]] && init_args+=(--yes)
+    python3 "${SCRIPT_DIR}/lib/project_init.py" "${init_args[@]}"
+    ok "Initialized ${BZ_DIR}/project"
     echo ""
     cat bz.yaml
     echo ""
@@ -337,19 +422,30 @@ cmd_new() {
 # ── LAUNCH ───────────────────────────────────────
 
 cmd_launch() {
+    local auto_dashboard_prompt=1
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-dashboard) auto_dashboard_prompt=0; shift ;;
+            --dashboard) auto_dashboard_prompt=1; shift ;;
+            *) err "Unknown launch option: $1"; exit 1 ;;
+        esac
+    done
+
     require_config
     local project
     project="$(project_name)"
     local project_root_abs
     project_root_abs="$(pwd -P)"
+    python3 "${SCRIPT_DIR}/lib/project_init.py" --project-root "${project_root_abs}" --yes --no-config-write >/dev/null
 
     echo ""
     echo "  ${BOLD}🚀 bz — Launch${NC}"
     echo "  Project: ${project}"
     echo ""
 
-    mkdir -p "${BZ_DIR}/agents" "${BZ_DIR}/logs" "${BZ_DIR}/memory/agents"
-    write_brain_memory_file "${BZ_DIR}/memory/brain.md"
+    mkdir -p "${BZ_DIR}/agents" "${BZ_DIR}/logs" "${BZ_DIR}/memory/agents" "${BZ_DIR}/project/memories"
+    write_brain_memory_file "$(brain_memory_relpath)"
 
     # Preflight: check required CLIs are installed and authenticated
     local required_runtimes=()
@@ -465,6 +561,16 @@ for i, a in enumerate(d.get('agents', [])):
         cat > "${agent_dir}/BRIEF.md" << BRIEFEOF
 # Agent: ${agent_id}
 
+## Project Context
+- Project: $(project_doc_relpath)
+- Target criteria: $(target_doc_relpath)
+- Your soul: $(agent_soul_relpath "$agent_id")
+- Brain soul: $(brain_soul_relpath)
+- Shared memory: $(shared_memory_relpath)
+- Your memory: ${memory_rel}
+- Your plan: $(agent_plan_relpath "$agent_id")
+- Your output directory: ${BZ_DIR}/project/outputs/${agent_id}/
+
 ## Task
 ${task}
 
@@ -473,11 +579,15 @@ ${focus}
 
 ## Memory
 - Your private memory: ${memory_rel}
-- Brain memory: ${BZ_DIR}/memory/brain.md (read only when needed)
+- Shared memory: $(shared_memory_relpath)
+- Brain memory: $(brain_memory_relpath) (read only when needed)
 
 ## Rules
 - After EACH file you create/modify: git add <file> && git commit -m "[${agent_id}] <description>"
+- Before implementation: write a concrete step-by-step plan to $(agent_plan_relpath "$agent_id")
 - After each meaningful step: update the canonical control plane with .bz/bin/bzctl write-state --agent ${agent_id} ...
+- For every task/subtask boundary, append a DB task event with .bz/bin/bzctl task-event --agent ${agent_id} --task "..." --sub-task "..." --state <start|working|end|hold|blocked|review|done> --notes "..."
+- While active, update state at least every 10 minutes even if no output is ready yet
 - STATUS.md is compatibility output. If bzctl is unavailable, update ${BZ_DIR}/agents/${agent_id}/STATUS.md using the exact field names already present
 - Read .bz/control/contexts/${agent_id}.md before new work and whenever a new action arrives
 - Keep ${memory_rel} current with concise bullets for decisions, blockers, and handoff context
@@ -530,10 +640,18 @@ BRIEFEOF
             # Copy agent state to worktree
             mkdir -p "${wt_path}/${BZ_DIR}/agents/${agent_id}"
             mkdir -p "${wt_path}/${BZ_DIR}/memory/agents"
+            mkdir -p "${wt_path}/${BZ_DIR}/project/souls" "${wt_path}/${BZ_DIR}/project/memories" "${wt_path}/${BZ_DIR}/project/plans" "${wt_path}/${BZ_DIR}/project/outputs/brain" "${wt_path}/${BZ_DIR}/project/outputs/${agent_id}" "${wt_path}/${BZ_DIR}/project/chatlogs" "${wt_path}/${BZ_DIR}/project/scheduler"
             cp "${agent_dir}/BRIEF.md" "${wt_path}/${BZ_DIR}/agents/${agent_id}/"
             cp "${agent_dir}/STATUS.md" "${wt_path}/${BZ_DIR}/agents/${agent_id}/"
-            cp "${memory_rel}" "${wt_path}/${memory_rel}"
-            cp "${BZ_DIR}/memory/brain.md" "${wt_path}/${BZ_DIR}/memory/brain.md"
+            [[ -f "$(project_doc_relpath)" ]] && cp "$(project_doc_relpath)" "${wt_path}/$(project_doc_relpath)"
+            [[ -f "$(target_doc_relpath)" ]] && cp "$(target_doc_relpath)" "${wt_path}/$(target_doc_relpath)"
+            [[ -f "$(brain_soul_relpath)" ]] && cp "$(brain_soul_relpath)" "${wt_path}/$(brain_soul_relpath)"
+            [[ -f "$(agent_soul_relpath "$agent_id")" ]] && cp "$(agent_soul_relpath "$agent_id")" "${wt_path}/$(agent_soul_relpath "$agent_id")"
+            [[ -f "$(brain_memory_relpath)" ]] && cp "$(brain_memory_relpath)" "${wt_path}/$(brain_memory_relpath)"
+            [[ -f "$(shared_memory_relpath)" ]] && cp "$(shared_memory_relpath)" "${wt_path}/$(shared_memory_relpath)"
+            [[ -f "${memory_rel}" ]] && cp "${memory_rel}" "${wt_path}/${memory_rel}"
+            [[ -f "$(agent_plan_relpath "$agent_id")" ]] && cp "$(agent_plan_relpath "$agent_id")" "${wt_path}/$(agent_plan_relpath "$agent_id")"
+            [[ -f "${BZ_DIR}/project/scheduler/policy.yaml" ]] && cp "${BZ_DIR}/project/scheduler/policy.yaml" "${wt_path}/${BZ_DIR}/project/scheduler/policy.yaml"
             work_dir="$wt_path"
             ok "Created worktree: ${branch}"
         fi
@@ -556,16 +674,21 @@ BRIEFEOF
         local prompt="You are an autonomous coding agent named '${agent_id}'. Execute your task NOW without asking questions.
 
 Read ${BZ_DIR}/agents/${agent_id}/BRIEF.md for your task.
+Read $(project_doc_relpath), $(target_doc_relpath), $(agent_soul_relpath "$agent_id"), $(shared_memory_relpath), and ${memory_rel}.
 Read .bz/control/contexts/${agent_id}.md before touching code.
+Write your implementation plan to $(agent_plan_relpath "$agent_id") before changing project files.
 
 CRITICAL RULES:
 1. After EACH file: git add <file> && git commit -m \"[${agent_id}] <description>\"
 2. Canonical status/action lives in the control plane. After each meaningful step and every commit, run:
    .bz/bin/bzctl write-state --agent ${agent_id} --phase <starting|planning|blocked|working|executing|ready-for-review> --action \"<current action>\" --summary \"<one-line summary>\" --depends-on \"<agent-id|none>\" --needs-brain \"<no|review|unblock|redirect>\" --files \"file1,file2\" --next-step \"<next step>\" --blocker \"<none or blocker>\" --updated-by agent
-3. Keep ${memory_rel} concise and current with decisions, blockers, and handoff notes
-4. Record durable context in the control plane:
+3. For every task/subtask boundary, run:
+   .bz/bin/bzctl task-event --agent ${agent_id} --task \"<task>\" --sub-task \"<subtask>\" --state <start|working|end|hold|blocked|review|done> --notes \"<short note>\" --source agent
+4. While active, update state at least every 10 minutes even if you have no new output yet
+5. Keep ${memory_rel} concise and current with decisions, blockers, and handoff notes
+6. Record durable context in the control plane:
    .bz/bin/bzctl add-memory --owner agent:${agent_id} --scope <private|shared> --kind <observation|decision|handoff|result|constraint> --summary \"<one-line memory>\" --details \"<durable details only>\"
-5. State lifecycle: starting → planning → blocked → working → executing → ready-for-review → done
+7. State lifecycle: starting → planning → blocked → working → executing → ready-for-review → done
    - Set State: working while writing code
    - Set Action: <current concrete verb phrase> at all times
    - Set State: executing when running scripts/experiments (no more code changes, just compute)
@@ -573,7 +696,7 @@ CRITICAL RULES:
    - Set Needs brain: unblock if blocked, redirect if you need new instructions, review when finished, otherwise no
    - Set State: ready-for-review when you believe your task is complete (brain will confirm)
    - Only the brain sets State: done after reviewing your work
-6. If a brain or human message arrives, immediately re-read .bz/control/contexts/${agent_id}.md and .bz/control/agents/${agent_id}/latest-action.md before acting
+8. If a brain or human message arrives, immediately re-read .bz/control/contexts/${agent_id}.md and .bz/control/agents/${agent_id}/latest-action.md before acting
 
 CONTEXT MANAGEMENT — keep your memory lean:
 - Do NOT read files you don't need. Only read files relevant to your current step.
@@ -655,7 +778,7 @@ START NOW."
         "no" \
         "Wait for nerve signals." \
         "none" \
-        "${BZ_DIR}/memory/brain.md"
+        "$(brain_memory_relpath)"
     control_plane write-state \
         --agent supervisor \
         --phase monitoring \
@@ -670,24 +793,20 @@ START NOW."
         --source launch >/dev/null
     ok "Brain ready (on-demand, wakes on state changes)"
 
-    # Start reconcile loop
-    local reconcile_pid_file="${BZ_DIR}/reconcile.pid"
-    if [[ -f "$reconcile_pid_file" ]]; then
-        kill "$(cat "$reconcile_pid_file")" 2>/dev/null || true
-    fi
-    nohup bash "${SCRIPT_DIR}/lib/reconcile.sh" "$(pwd)" > "${BZ_DIR}/logs/reconcile.log" 2>&1 &
-    echo $! > "$reconcile_pid_file"
-    ok "Reconcile loop started (PID: $!)"
+    # Start reconcile loop in tmux so it survives the launcher shell exiting.
+    start_reconcile_loop "${project_root_abs}"
 
     echo ""
     echo "  ${GREEN}${BOLD}Agents launched!${NC}"
     echo ""
 
-    # Offer dashboard
-    printf "  Start dashboard? [Y/n]: "
-    read -r dash_answer
-    if [[ ! "$dash_answer" =~ ^[Nn] ]]; then
-        cmd_dashboard
+    if [[ "$auto_dashboard_prompt" -eq 1 ]]; then
+        # Offer dashboard
+        printf "  Start dashboard? [Y/n]: "
+        read -r dash_answer
+        if [[ ! "$dash_answer" =~ ^[Nn] ]]; then
+            cmd_dashboard
+        fi
     fi
 
     echo ""
@@ -872,17 +991,29 @@ cmd_dashboard() {
     require_config
     local port="${1:-3333}"
     local dash_pid_file="${BZ_DIR}/dashboard.pid"
+    local bz_exec
+    bz_exec="$(realpath "${BASH_SOURCE[0]}")"
+    local project_root_abs
+    project_root_abs="$(pwd -P)"
+    local dashboard_session
+    dashboard_session="$(session_name "dashboard")"
+    local dashboard_log="${BZ_DIR}/logs/dashboard.log"
+
+    mkdir -p "${BZ_DIR}/logs"
 
     # Kill existing dashboard
     if [[ -f "$dash_pid_file" ]]; then
         kill "$(cat "$dash_pid_file")" 2>/dev/null || true
+        rm -f "$dash_pid_file"
     fi
+    kill_tmux_session_tree "$dashboard_session"
     lsof -ti:"$port" 2>/dev/null | xargs kill 2>/dev/null || true
     sleep 1
 
-    nohup python3 "${SCRIPT_DIR}/dashboard/server.py" "$port" "$(pwd)" > "${BZ_DIR}/logs/dashboard.log" 2>&1 &
-    echo $! > "$dash_pid_file"
-    ok "Dashboard at http://localhost:${port}"
+    local cmd
+    cmd="cd $(shell_quote "$project_root_abs") && echo \$\$ > $(shell_quote "$dash_pid_file") && exec python3 $(shell_quote "${SCRIPT_DIR}/dashboard/server.py") $(shell_quote "$port") $(shell_quote "$project_root_abs") $(shell_quote "$bz_exec") >> $(shell_quote "$dashboard_log") 2>&1"
+    tmux new-session -d -s "$dashboard_session" -x 160 -y 40 "$cmd"
+    ok "Dashboard at http://localhost:${port} → tmux: ${dashboard_session}"
 }
 
 # ── CLEAN ────────────────────────────────────────
@@ -1019,7 +1150,7 @@ cmd_feedback() {
 
 Read .bz/control/contexts/${target}.md and .bz/control/agents/${target}/latest-action.md first.
 
-Then read your previous work in the worktree and your memory file ${BZ_DIR}/memory/agents/${target}.md, apply the fix, commit with [${target}] prefix, update your canonical state with .bz/bin/bzctl write-state, and update your memory with the outcome. Set Needs brain: review when finished."
+Then read your previous work in the worktree and your memory file $(agent_memory_relpath "$target"), apply the fix, commit with [${target}] prefix, update your canonical state with .bz/bin/bzctl write-state, and update your memory with the outcome. Set Needs brain: review when finished."
 
         tmux new-session -d -s "$sess" -x 200 -y 50
         local cmd

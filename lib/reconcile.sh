@@ -7,7 +7,7 @@ set -euo pipefail
 # Every 30s (FREE, bash only):
 #   1. Scan STATUS.md for state changes    → wake brain if changed
 #   2. Check tmux sessions alive           → wake brain if crashed
-#   3. Check git commit timestamps         → wake brain if stalled
+#   3. Check DuckDB state heartbeats       → wake brain if stalled
 #   4. All clear?                          → sleep, save tokens
 #
 # Every 15m (PROACTIVE, costs tokens):
@@ -17,19 +17,22 @@ set -euo pipefail
 # ══════════════════════════════════════════════════════════════
 
 PROJECT_ROOT="${1:?Usage: reconcile.sh <project-root>}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BZ_DIR="${PROJECT_ROOT}/.bz"
 LOG_DIR="${BZ_DIR}/logs"
 SIGNATURES_FILE="${LOG_DIR}/.signatures"
 LAST_PROACTIVE_FILE="${LOG_DIR}/.last-proactive"
 LAST_COMMIT_FILE="${LOG_DIR}/.last-commits"
-MEMORY_DIR="${BZ_DIR}/memory"
-BRAIN_MEMORY_FILE="${MEMORY_DIR}/brain.md"
+PROJECT_STATE_DIR="${BZ_DIR}/project"
+MEMORY_DIR="${PROJECT_STATE_DIR}/memories"
+BRAIN_MEMORY_FILE="${MEMORY_DIR}/brain_mem.md"
+SHARED_MEMORY_FILE="${MEMORY_DIR}/shared_mem.md"
 
 SCAN_INTERVAL=30
 PROACTIVE_INTERVAL=900   # 15 min default
-STALL_THRESHOLD=600      # 10 min without commits = stalled
+HEARTBEAT_INTERVAL=600   # 10 min without state heartbeat = stalled
 
-mkdir -p "$LOG_DIR" "${MEMORY_DIR}/agents"
+mkdir -p "$LOG_DIR" "$MEMORY_DIR"
 
 # Read config
 if [[ -f "${PROJECT_ROOT}/bz.yaml" ]]; then
@@ -39,6 +42,12 @@ with open('${PROJECT_ROOT}/bz.yaml') as f:
     d = yaml.safe_load(f)
 print(int(d.get('supervisor',{}).get('proactive_check_mins', 15)) * 60)
 " 2>/dev/null || echo 900)"
+    HEARTBEAT_INTERVAL="$(python3 -c "
+import yaml
+with open('${PROJECT_ROOT}/bz.yaml') as f:
+    d = yaml.safe_load(f)
+print(int(d.get('supervisor',{}).get('zombie_heartbeat_mins', 10)) * 60)
+" 2>/dev/null || echo 600)"
 fi
 
 # ── Helpers ──────────────────────────────────────
@@ -56,7 +65,7 @@ with open('${PROJECT_ROOT}/bz.yaml') as f:
 }
 
 control_plane() {
-    python3 "${PROJECT_ROOT}/lib/control_plane.py" --project-root "${PROJECT_ROOT}" "$@"
+    python3 "${SCRIPT_DIR}/control_plane.py" --project-root "${PROJECT_ROOT}" "$@"
 }
 
 PROJECT_NAME="$(project_name)"
@@ -72,7 +81,7 @@ agent_status_file() {
 }
 
 agent_memory_file() {
-    echo "${MEMORY_DIR}/agents/$1.md"
+    echo "${MEMORY_DIR}/$1_mem.md"
 }
 
 ensure_brain_memory() {
@@ -87,6 +96,14 @@ ensure_brain_memory() {
 - none
 
 ## Open handoffs
+- none
+EOF
+    fi
+    if [[ ! -f "$SHARED_MEMORY_FILE" ]]; then
+        cat > "$SHARED_MEMORY_FILE" <<'EOF'
+# Shared Memory
+
+## Summary
 - none
 EOF
     fi
@@ -146,15 +163,31 @@ push_protocol_to_worktree() {
     local rel_bz="${BZ_DIR#${PROJECT_ROOT}/}"
     local rel_memory_dir="${MEMORY_DIR#${PROJECT_ROOT}/}"
     local rel_brain="${BRAIN_MEMORY_FILE#${PROJECT_ROOT}/}"
+    local rel_shared="${SHARED_MEMORY_FILE#${PROJECT_ROOT}/}"
     local agent_memory_src
     agent_memory_src="$(agent_memory_file "$agent_id")"
     local rel_agent_memory="${agent_memory_src#${PROJECT_ROOT}/}"
 
-    mkdir -p "${wt}/${rel_bz}/agents/${agent_id}" "${wt}/${rel_memory_dir}/agents"
+    mkdir -p \
+        "${wt}/${rel_bz}/agents/${agent_id}" \
+        "${wt}/${rel_bz}/project/souls" \
+        "${wt}/${rel_memory_dir}" \
+        "${wt}/${rel_bz}/project/plans" \
+        "${wt}/${rel_bz}/project/outputs/brain" \
+        "${wt}/${rel_bz}/project/outputs/${agent_id}" \
+        "${wt}/${rel_bz}/project/chatlogs" \
+        "${wt}/${rel_bz}/project/scheduler"
     [[ -f "${BZ_DIR}/agents/${agent_id}/STATUS.md" ]] && cp "${BZ_DIR}/agents/${agent_id}/STATUS.md" "${wt}/${rel_bz}/agents/${agent_id}/STATUS.md"
     [[ -f "${BZ_DIR}/agents/${agent_id}/DECISION.md" ]] && cp "${BZ_DIR}/agents/${agent_id}/DECISION.md" "${wt}/${rel_bz}/agents/${agent_id}/DECISION.md"
+    [[ -f "${PROJECT_STATE_DIR}/PROJECT.md" ]] && cp "${PROJECT_STATE_DIR}/PROJECT.md" "${wt}/${rel_bz}/project/PROJECT.md"
+    [[ -f "${PROJECT_STATE_DIR}/TARGET.md" ]] && cp "${PROJECT_STATE_DIR}/TARGET.md" "${wt}/${rel_bz}/project/TARGET.md"
+    [[ -f "${PROJECT_STATE_DIR}/souls/brain_soul.md" ]] && cp "${PROJECT_STATE_DIR}/souls/brain_soul.md" "${wt}/${rel_bz}/project/souls/brain_soul.md"
+    [[ -f "${PROJECT_STATE_DIR}/souls/${agent_id}_soul.md" ]] && cp "${PROJECT_STATE_DIR}/souls/${agent_id}_soul.md" "${wt}/${rel_bz}/project/souls/${agent_id}_soul.md"
     [[ -f "$agent_memory_src" ]] && cp "$agent_memory_src" "${wt}/${rel_agent_memory}"
     [[ -f "$BRAIN_MEMORY_FILE" ]] && cp "$BRAIN_MEMORY_FILE" "${wt}/${rel_brain}"
+    [[ -f "$SHARED_MEMORY_FILE" ]] && cp "$SHARED_MEMORY_FILE" "${wt}/${rel_shared}"
+    [[ -f "${PROJECT_STATE_DIR}/plans/${agent_id}_plan.md" ]] && cp "${PROJECT_STATE_DIR}/plans/${agent_id}_plan.md" "${wt}/${rel_bz}/project/plans/${agent_id}_plan.md"
+    [[ -f "${PROJECT_STATE_DIR}/scheduler/policy.yaml" ]] && cp "${PROJECT_STATE_DIR}/scheduler/policy.yaml" "${wt}/${rel_bz}/project/scheduler/policy.yaml"
 }
 
 update_status_after_decision() {
@@ -209,6 +242,12 @@ update_status_after_decision() {
             summary="Brain placed this task on hold."
             next_step="Wait for new instructions."
             blocker="${detail:-brain hold}"
+            ;;
+        status-check)
+            state="working"
+            action="responding to heartbeat check"
+            summary="Brain requested a status update."
+            next_step="${detail:-Update state, memory, and current task progress now.}"
             ;;
         *)
             action="following brain decision"
@@ -266,6 +305,46 @@ all_done() {
     [[ "$has_agents" -eq 1 ]] && return 0 || return 1
 }
 
+shutdown_finished_run() {
+    log "All zombies finished and brain-confirmed. Stopping background agent tasks."
+    control_plane write-state \
+        --agent supervisor \
+        --phase done \
+        --action "project finished" \
+        --summary "All zombies finished and brain confirmed completion." \
+        --depends-on "" \
+        --needs-brain no \
+        --files "" \
+        --next-step "none" \
+        --blocker none \
+        --updated-by system \
+        --source reconcile >/dev/null 2>&1 || true
+    control_plane record-event \
+        --type project_finished \
+        --source reconcile \
+        --summary "All zombies finished and brain confirmed completion." \
+        --details "Reconcile loop stopped zombie tmux sessions and exited." >/dev/null 2>&1 || true
+
+    for sess in $(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^bz-${PROJECT_NAME}-" || true); do
+        case "$sess" in
+            *-supervisor) ;;
+            *)
+                for pane_pid in $(tmux list-panes -t "$sess" -F '#{pane_pid}' 2>/dev/null); do
+                    pkill -TERM -P "$pane_pid" 2>/dev/null || true
+                    for child in $(pgrep -P "$pane_pid" 2>/dev/null); do
+                        pkill -TERM -P "$child" 2>/dev/null || true
+                    done
+                done
+                sleep 1
+                tmux kill-session -t "$sess" 2>/dev/null || true
+                log "Stopped finished session: $sess"
+                ;;
+        esac
+    done
+
+    rm -f "${BZ_DIR}/reconcile.pid"
+}
+
 sync_status_from_worktrees() {
     for wt_status in "${BZ_DIR}/worktrees"/*/".bz/agents"/*/STATUS.md; do
         [[ -f "$wt_status" ]] || continue
@@ -279,20 +358,20 @@ sync_status_from_worktrees() {
 }
 
 sync_memory_from_worktrees() {
-    for wt_memory in "${BZ_DIR}/worktrees"/*/".bz/memory/agents"/*.md; do
+    for wt_memory in "${BZ_DIR}/worktrees"/*/".bz/project/memories"/*_mem.md; do
         [[ -f "$wt_memory" ]] || continue
         local fname
         fname="$(basename "$wt_memory")"
-        local main_memory="${MEMORY_DIR}/agents/${fname}"
+        local main_memory="${MEMORY_DIR}/${fname}"
         if [[ ! -f "$main_memory" || "$wt_memory" -nt "$main_memory" ]]; then
             cp "$wt_memory" "$main_memory"
         fi
     done
 
-    for wt_brain in "${BZ_DIR}/worktrees"/*/".bz/memory/brain.md"; do
-        [[ -f "$wt_brain" ]] || continue
-        if [[ ! -f "$BRAIN_MEMORY_FILE" || "$wt_brain" -nt "$BRAIN_MEMORY_FILE" ]]; then
-            cp "$wt_brain" "$BRAIN_MEMORY_FILE"
+    for wt_shared in "${BZ_DIR}/worktrees"/*/".bz/project/memories/shared_mem.md"; do
+        [[ -f "$wt_shared" ]] || continue
+        if [[ ! -f "$SHARED_MEMORY_FILE" || "$wt_shared" -nt "$SHARED_MEMORY_FILE" ]]; then
+            cp "$wt_shared" "$SHARED_MEMORY_FILE"
         fi
     done
 }
@@ -423,43 +502,10 @@ check_zombie_alive() {
     return 1
 }
 
-# Check 3: no new commits in worktree (stalled)
+# Check 3: active zombie missed heartbeat
 check_stalled() {
     local stalled=""
-    local now
-    now="$(date +%s)"
-
-    for agent_dir in "${BZ_DIR}/agents"/*/; do
-        [[ -d "$agent_dir" ]] || continue
-        local agent_id
-        agent_id="$(basename "$agent_dir")"
-        [[ "$agent_id" == "supervisor" ]] && continue
-
-        local state
-        state="$(status_field "${agent_dir}/STATUS.md" "State")"
-        [[ "$state" == "done" || "$state" == "finished" || "$state" == "blocked" || "$state" == "starting" || "$state" == "executing" || "$state" == "running" || "$state" == "ready-for-review" ]] && continue
-
-        # Also skip stall check if summary mentions running/executing
-        local summary
-        summary="$(status_field "${agent_dir}/STATUS.md" "Summary" | tr '[:upper:]' '[:lower:]')"
-        if [[ "$summary" == *"running"* || "$summary" == *"experiment"* || "$summary" == *"executing"* || "$summary" == *"training"* ]]; then
-            continue
-        fi
-
-        # Check last commit time in worktree
-        local wt="${BZ_DIR}/worktrees/${agent_id}"
-        local last_commit=0
-        if [[ -d "$wt/.git" || -f "$wt/.git" ]]; then
-            last_commit="$(git -C "$wt" log -1 --format='%ct' 2>/dev/null || echo 0)"
-        fi
-
-        if [[ "$last_commit" -gt 0 ]]; then
-            local elapsed=$((now - last_commit))
-            if [[ "$elapsed" -ge "$STALL_THRESHOLD" ]]; then
-                stalled="${stalled} ${agent_id}(${elapsed}s)"
-            fi
-        fi
-    done
+    stalled="$(control_plane stale-agents --heartbeat-mins "$((HEARTBEAT_INTERVAL/60))" --format names 2>/dev/null | tr '\n' ' ' || true)"
 
     [[ -n "$stalled" ]] && echo "$stalled" && return 0
     return 1
@@ -530,7 +576,7 @@ ${diff_stat}"
     fi
 
     # Output files: reports, results (truncated to avoid prompt explosion)
-    for report in "${wt}/outputs/research/"*.md "${wt}/outputs/research/"*.json; do
+    for report in "${wt}/.bz/project/outputs/${agent_id}/"* "${wt}/outputs/research/"*.md "${wt}/outputs/research/"*.json; do
         [[ -f "$report" ]] || continue
         local fname
         fname="$(basename "$report")"
@@ -587,7 +633,7 @@ wake_brain() {
             mode_brief="One or more zombie tmux sessions died. Decide whether to restart, redirect, or hold affected zombies."
             ;;
         stall)
-            mode_brief="One or more zombies appear stalled. Diagnose likely cause from context and issue a concrete unblock or redirect."
+            mode_brief="One or more zombies missed the 10 minute state heartbeat. Issue a concrete status-check, unblock, redirect, restart, or hold action."
             ;;
         proactive)
             mode_brief="Run a proactive supervision pass. If no intervention is required, return an empty actions list."
@@ -634,7 +680,7 @@ ${review_details}"
   "actions": [
     {
       "to": "agent-id",
-      "kind": "accept | redirect | unblock | restart | hold",
+      "kind": "accept | redirect | unblock | restart | hold | status-check",
       "summary": "one-line instruction/result",
       "details": "specific action the zombie should take next",
       "reason": "why this action is needed"
@@ -803,7 +849,7 @@ Then execute the action immediately."
 
 # ── Main Loop ────────────────────────────────────
 
-echo "[nerve] Started — scan:${SCAN_INTERVAL}s proactive:$((PROACTIVE_INTERVAL/60))m stall:$((STALL_THRESHOLD/60))m"
+echo "[nerve] Started — scan:${SCAN_INTERVAL}s proactive:$((PROACTIVE_INTERVAL/60))m heartbeat:$((HEARTBEAT_INTERVAL/60))m"
 echo "[nerve] Watching: ${BZ_DIR}/agents/*/STATUS.md"
 
 date +%s > "$LAST_PROACTIVE_FILE" 2>/dev/null || true
@@ -814,10 +860,10 @@ while true; do
     sync_memory_from_worktrees 2>/dev/null || true
     control_plane sync-all --quiet >/dev/null 2>&1 || true
 
-    # Skip everything if all done
+    # Stop background work once every zombie is brain-confirmed finished.
     if all_done 2>/dev/null; then
-        sleep "$SCAN_INTERVAL"
-        continue
+        shutdown_finished_run
+        exit 0
     fi
 
     wake_needed=0

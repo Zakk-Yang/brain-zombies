@@ -21,6 +21,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+from project_layout import (
+    agent_memory_path as project_agent_memory_path,
+    agent_output_dir,
+    agent_plan_path,
+    agent_soul_path,
+    brain_memory_path as project_brain_memory_path,
+    brain_output_dir,
+    brain_soul_path,
+    ensure_project_layout,
+    project_paths,
+    rel_to_root,
+    shared_memory_path,
+)
+from state_store import DuckDBStateStore
+
 
 STATE_VERSION = 1
 ACTION_VERSION = 1
@@ -152,23 +167,23 @@ def project_root_path(value: str | Path) -> Path:
 
 
 def bz_dir(root: Path) -> Path:
-    return root / ".bz"
+    return project_paths(root).bz_dir
 
 
 def control_dir(root: Path) -> Path:
-    return bz_dir(root) / "control"
+    return project_paths(root).control_dir
 
 
 def control_agents_dir(root: Path) -> Path:
-    return control_dir(root) / "agents"
+    return project_paths(root).control_agents_dir
 
 
 def control_memories_dir(root: Path) -> Path:
-    return control_dir(root) / "memories"
+    return project_paths(root).control_memories_dir
 
 
 def control_contexts_dir(root: Path) -> Path:
-    return control_dir(root) / "contexts"
+    return project_paths(root).control_contexts_dir
 
 
 def events_path(root: Path) -> Path:
@@ -216,6 +231,19 @@ def memory_path(root: Path, owner: str) -> Path:
     return control_memories_dir(root) / f"{key}.jsonl"
 
 
+def memory_markdown_path(root: Path, owner: str) -> Path:
+    key = owner.strip()
+    if key in {"brain", "supervisor"}:
+        return project_brain_memory_path(root)
+    if key.startswith("agent:"):
+        return project_agent_memory_path(root, key.split(":", 1)[1])
+    return project_agent_memory_path(root, key)
+
+
+def memory_markdown_ref(root: Path, owner: str) -> str:
+    return rel_to_root(root, memory_markdown_path(root, owner))
+
+
 def context_path(root: Path, viewer: str) -> Path:
     if viewer == "brain":
         return control_contexts_dir(root) / "brain.md"
@@ -225,12 +253,8 @@ def context_path(root: Path, viewer: str) -> Path:
 
 
 def ensure_layout(root: Path, agent_ids: Iterable[str] = ()) -> None:
-    control_agents_dir(root).mkdir(parents=True, exist_ok=True)
-    control_memories_dir(root).mkdir(parents=True, exist_ok=True)
-    control_contexts_dir(root).mkdir(parents=True, exist_ok=True)
-    (bz_dir(root) / "logs").mkdir(parents=True, exist_ok=True)
-    for agent_id in agent_ids:
-        (control_agents_dir(root) / agent_id).mkdir(parents=True, exist_ok=True)
+    ensure_project_layout(root, agent_ids)
+    DuckDBStateStore(root).initialize(agent_ids)
 
 
 def list_agent_ids(root: Path) -> list[str]:
@@ -241,6 +265,10 @@ def list_agent_ids(root: Path) -> list[str]:
     control_root = control_agents_dir(root)
     if control_root.exists():
         ids.update(path.name for path in control_root.iterdir() if path.is_dir())
+    try:
+        ids.update(DuckDBStateStore(root).list_agent_ids())
+    except Exception:
+        pass
     return sorted(ids)
 
 
@@ -265,10 +293,10 @@ def infer_action(fields: dict[str, str]) -> str:
     )
 
 
-def status_markdown_from_state(state: dict[str, Any]) -> str:
+def status_markdown_from_state(root: Path, state: dict[str, Any]) -> str:
     files_touched = state.get("files_touched", [])
     agent_id = state.get("agent_id", "")
-    memory_ref = ".bz/control/memories/brain.jsonl" if agent_id == "supervisor" else f".bz/control/memories/{agent_id}.jsonl"
+    memory_ref = memory_markdown_ref(root, "brain" if agent_id == "supervisor" else f"agent:{agent_id}")
     lines = [
         "# STATUS.md",
         f"State: {state.get('phase', 'unknown')}",
@@ -316,19 +344,44 @@ def append_event(
         "details": flatten_text(details),
         "payload": payload or {},
     }
+    DuckDBStateStore(root).add_event(event)
     append_jsonl(events_path(root), event)
 
 
 def load_state(root: Path, agent_id: str) -> dict[str, Any]:
+    try:
+        state = DuckDBStateStore(root).get_agent_state(agent_id)
+        if state:
+            return state
+    except Exception:
+        pass
     return read_json(agent_state_path(root, agent_id), {})
+
+
+def enrich_state_paths(root: Path, state: dict[str, Any]) -> None:
+    agent_id = state.get("agent_id", "")
+    if not agent_id:
+        return
+    if agent_id == "supervisor":
+        state.setdefault("soul_path", rel_to_root(root, brain_soul_path(root)))
+        state.setdefault("memory_path", rel_to_root(root, project_brain_memory_path(root)))
+        state.setdefault("plan_path", "")
+        state.setdefault("output_path", rel_to_root(root, brain_output_dir(root)))
+        return
+    state.setdefault("soul_path", rel_to_root(root, agent_soul_path(root, agent_id)))
+    state.setdefault("memory_path", rel_to_root(root, project_agent_memory_path(root, agent_id)))
+    state.setdefault("plan_path", rel_to_root(root, agent_plan_path(root, agent_id)))
+    state.setdefault("output_path", rel_to_root(root, agent_output_dir(root, agent_id)))
 
 
 def save_state(root: Path, agent_id: str, state: dict[str, Any]) -> dict[str, Any]:
     ensure_layout(root, [agent_id])
     state["schema_version"] = STATE_VERSION
     state["agent_id"] = agent_id
+    enrich_state_paths(root, state)
+    DuckDBStateStore(root).upsert_agent_state(state)
     write_json(agent_state_path(root, agent_id), state)
-    status_text = status_markdown_from_state(state)
+    status_text = status_markdown_from_state(root, state)
     write_text_and_mirror(root, agent_id, f".bz/agents/{agent_id}/STATUS.md", status_text)
     return state
 
@@ -417,11 +470,27 @@ def write_state(
             "blocker": state["blocker"],
         },
     )
+    if agent_id != "supervisor":
+        DuckDBStateStore(root).add_task_event(
+            zombie_name=agent_id,
+            task=state["action"],
+            sub_task=state["next_step"],
+            state=state["phase"],
+            notes=state["summary"],
+            source=source,
+            timestamp=state["updated_at"],
+        )
     refresh_contexts(root)
     return state
 
 
 def load_actions(root: Path, agent_id: str) -> list[dict[str, Any]]:
+    try:
+        actions = DuckDBStateStore(root).load_actions(agent_id)
+        if actions:
+            return actions
+    except Exception:
+        pass
     return read_jsonl(agent_actions_path(root, agent_id))
 
 
@@ -473,6 +542,7 @@ def queue_action(
     ensure_layout(root, [to_agent])
     actions = load_actions(root, to_agent)
     if replace_pending:
+        DuckDBStateStore(root).supersede_pending_actions(to_agent)
         updated = False
         for action in actions:
             if action.get("status") in {"pending", "delivered", "acknowledged"}:
@@ -494,6 +564,7 @@ def queue_action(
         "reason": flatten_text(reason),
     }
     actions.append(action)
+    DuckDBStateStore(root).add_action(action)
     write_jsonl(agent_actions_path(root, to_agent), actions)
     action_markdown = render_action_markdown(action)
     write_text_and_mirror(root, to_agent, f".bz/control/agents/{to_agent}/latest-action.md", action_markdown)
@@ -535,6 +606,7 @@ def add_memory(
         "tags": [flatten_text(tag) for tag in (tags or []) if flatten_text(tag)],
         "related_agents": [flatten_text(agent) for agent in (related_agents or []) if flatten_text(agent)],
     }
+    DuckDBStateStore(root).add_memory(entry)
     append_jsonl(memory_path(root, owner), entry)
     append_event(
         root,
@@ -544,11 +616,18 @@ def add_memory(
         details=entry["details"],
         payload={"kind": entry["kind"], "scope": entry["scope"], "memory_id": entry["id"]},
     )
+    render_memory_mirrors(root)
     refresh_contexts(root)
     return entry
 
 
 def load_all_memories(root: Path) -> list[dict[str, Any]]:
+    try:
+        memories = DuckDBStateStore(root).load_memories()
+        if memories:
+            return memories
+    except Exception:
+        pass
     rows: list[dict[str, Any]] = []
     mem_root = control_memories_dir(root)
     if not mem_root.exists():
@@ -582,6 +661,16 @@ def owner_label(owner: str) -> str:
 
 def action_summary(action: dict[str, Any]) -> str:
     return f"[{action.get('kind', 'guidance')}] {action.get('summary', '')}".strip()
+
+
+def doc_excerpt(path: Path, max_lines: int = 40) -> list[str]:
+    if not path.exists():
+        return ["- missing"]
+    lines = path.read_text(errors="replace").splitlines()
+    excerpt = lines[:max_lines]
+    if len(lines) > max_lines:
+        excerpt.append("...")
+    return excerpt or ["- empty"]
 
 
 def state_age_minutes(state: dict[str, Any]) -> int | None:
@@ -671,6 +760,64 @@ def grouped_memory_lines(memories: list[dict[str, Any]], limit_per_owner: int = 
     return lines
 
 
+def render_memory_document(title: str, memories: list[dict[str, Any]]) -> str:
+    lines = [f"# {title}", "", f"Last rendered: {now_display()}", ""]
+    if not memories:
+        lines.extend(["## Summary", "- none"])
+        return "\n".join(lines).strip() + "\n"
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for memory in memories:
+        grouped.setdefault(memory.get("kind", "note"), []).append(memory)
+    for kind in sorted(grouped):
+        lines.append(f"## {kind.title()}")
+        for memory in grouped[kind][-20:]:
+            owner = owner_label(memory.get("owner", "unknown"))
+            scope = memory.get("scope", "private")
+            summary = memory.get("summary", "")
+            details = memory.get("details", "")
+            lines.append(f"- [{scope}] {owner}: {summary}")
+            if details:
+                lines.append(f"  - {details}")
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def render_memory_mirrors(root: Path) -> None:
+    ensure_project_layout(root, list_agent_ids(root))
+    memories = load_all_memories(root)
+    brain_items = [memory for memory in memories if memory.get("owner") == "brain"]
+    shared_items = [memory for memory in memories if memory.get("scope") == "shared"]
+
+    brain_path = project_brain_memory_path(root)
+    brain_path.write_text(render_memory_document("Brain Memory", brain_items))
+    shared_path = shared_memory_path(root)
+    shared_path.write_text(render_memory_document("Shared Memory", shared_items))
+
+    legacy_brain = bz_dir(root) / "memory" / "brain.md"
+    ensure_parent(legacy_brain)
+    legacy_brain.write_text(brain_path.read_text())
+
+    for agent_id in list_agent_ids(root):
+        if agent_id == "supervisor":
+            continue
+        for path in (brain_path, shared_path):
+            mirror = worktree_mirror_path(root, agent_id, rel_to_root(root, path))
+            if mirror is not None:
+                ensure_parent(mirror)
+                mirror.write_text(path.read_text())
+        owner = f"agent:{agent_id}"
+        own_items = [memory for memory in memories if memory.get("owner") == owner]
+        agent_path = project_agent_memory_path(root, agent_id)
+        agent_path.write_text(render_memory_document(f"Agent Memory: {agent_id}", own_items))
+        mirror = worktree_mirror_path(root, agent_id, rel_to_root(root, agent_path))
+        if mirror is not None:
+            ensure_parent(mirror)
+            mirror.write_text(agent_path.read_text())
+        legacy_agent = bz_dir(root) / "memory" / "agents" / f"{agent_id}.md"
+        ensure_parent(legacy_agent)
+        legacy_agent.write_text(agent_path.read_text())
+
+
 def build_brain_context(root: Path) -> str:
     states = [load_state(root, agent_id) for agent_id in list_agent_ids(root) if load_state(root, agent_id)]
     visible_memories = load_visible_memories(root, "brain")
@@ -678,8 +825,17 @@ def build_brain_context(root: Path) -> str:
         "# Brain Context",
         f"Generated: {now_display()}",
         "",
-        "## Attention Queue",
+        "## Project",
     ]
+    lines.extend(doc_excerpt(project_paths(root).project_md, max_lines=24))
+    lines.extend(["", "## Target Criteria"])
+    lines.extend(doc_excerpt(project_paths(root).target_md, max_lines=24))
+    lines.extend(["", "## Brain Soul"])
+    lines.extend(doc_excerpt(brain_soul_path(root), max_lines=24))
+    lines.extend([
+        "",
+        "## Attention Queue",
+    ])
     attention = attention_items(root, states)
     lines.extend(attention or ["- none"])
     lines.extend(["", "## Agent Snapshot"])
@@ -705,11 +861,22 @@ def build_agent_context(root: Path, agent_id: str) -> str:
         f"# Agent Context: {agent_id}",
         f"Generated: {now_display()}",
         "",
+        "## Project",
+    ]
+    lines.extend(doc_excerpt(project_paths(root).project_md, max_lines=18))
+    lines.extend(["", "## Target Criteria"])
+    lines.extend(doc_excerpt(project_paths(root).target_md, max_lines=18))
+    lines.extend(["", "## Your Soul"])
+    lines.extend(doc_excerpt(agent_soul_path(root, agent_id), max_lines=24))
+    lines.extend(["", "## Your Plan"])
+    lines.extend(doc_excerpt(agent_plan_path(root, agent_id), max_lines=24))
+    lines.extend([
+        "",
         "## Your State",
         format_state_line(root, state) if state else "- no canonical state yet",
         "",
         "## Latest Action",
-    ]
+    ])
     if pending:
         lines.extend(
             [
@@ -728,6 +895,7 @@ def build_agent_context(root: Path, agent_id: str) -> str:
 
 def refresh_contexts(root: Path) -> None:
     ensure_layout(root)
+    render_memory_mirrors(root)
     brain_text = build_brain_context(root)
     ensure_parent(context_path(root, "brain"))
     context_path(root, "brain").write_text(brain_text)
@@ -749,6 +917,12 @@ def refresh_contexts(root: Path) -> None:
 
 
 def load_events(root: Path, limit: int | None = None) -> list[dict[str, Any]]:
+    try:
+        events = DuckDBStateStore(root).load_events(limit=limit)
+        if events:
+            return events
+    except Exception:
+        pass
     rows = read_jsonl(events_path(root))
     return rows[-limit:] if limit else rows
 
@@ -973,8 +1147,28 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     memory_parser.add_argument("--tags", default="")
     memory_parser.add_argument("--related", default="")
 
+    task_parser = sub.add_parser("task-event", help="Append a task/subtask state event")
+    task_parser.add_argument("--agent", required=True)
+    task_parser.add_argument("--task", required=True)
+    task_parser.add_argument("--sub-task", default="")
+    task_parser.add_argument("--state", required=True)
+    task_parser.add_argument("--notes", default="")
+    task_parser.add_argument("--source", default="control-plane")
+
     render_parser = sub.add_parser("render-context", help="Render brain or agent context")
     render_parser.add_argument("--viewer", required=True)
+
+    mirror_parser = sub.add_parser("render-mirrors", help="Regenerate Markdown mirrors from DuckDB")
+
+    stale_parser = sub.add_parser("stale-agents", help="Print active agents missing heartbeat")
+    stale_parser.add_argument("--heartbeat-mins", type=int, default=10)
+    stale_parser.add_argument("--format", choices=["names", "json"], default="names")
+
+    scheduler_parser = sub.add_parser("record-scheduler-check", help="Append a scheduler check row")
+    scheduler_parser.add_argument("--agent", required=True)
+    scheduler_parser.add_argument("--type", required=True)
+    scheduler_parser.add_argument("--result", required=True)
+    scheduler_parser.add_argument("--notes", default="")
 
     ingest_parser = sub.add_parser("ingest-brain-output", help="Convert brain output into control-plane records")
     ingest_parser.add_argument("--output-file", required=True)
@@ -1076,12 +1270,64 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(entry, indent=2, sort_keys=True))
         return 0
 
+    if args.command == "task-event":
+        entry = DuckDBStateStore(root).add_task_event(
+            zombie_name=args.agent,
+            task=args.task,
+            sub_task=args.sub_task,
+            state=args.state,
+            notes=args.notes,
+            source=args.source,
+        )
+        append_event(
+            root,
+            event_type="task_event",
+            source=args.source,
+            target=f"agent:{args.agent}",
+            summary=f"{args.agent} {args.state}: {args.task}",
+            details=args.notes,
+            payload=entry,
+        )
+        refresh_contexts(root)
+        print(json.dumps(entry, indent=2, sort_keys=True))
+        return 0
+
     if args.command == "render-context":
         refresh_contexts(root)
         if args.viewer == "brain":
             print(build_brain_context(root), end="")
         else:
             print(build_agent_context(root, args.viewer.split(":", 1)[-1]), end="")
+        return 0
+
+    if args.command == "render-mirrors":
+        refresh_contexts(root)
+        return 0
+
+    if args.command == "stale-agents":
+        stale = DuckDBStateStore(root).stale_agents(args.heartbeat_mins)
+        for row in stale:
+            DuckDBStateStore(root).add_scheduler_check(
+                row.get("agent_id", ""),
+                "heartbeat",
+                "stale",
+                f"age={row.get('age_minutes', 0)}m phase={row.get('phase', 'unknown')}",
+            )
+        if args.format == "json":
+            print(json.dumps(stale, indent=2, sort_keys=True))
+        else:
+            for row in stale:
+                print(f"{row.get('agent_id')}({row.get('age_minutes', 0)}m)")
+        return 0
+
+    if args.command == "record-scheduler-check":
+        entry = DuckDBStateStore(root).add_scheduler_check(
+            args.agent,
+            args.type,
+            args.result,
+            args.notes,
+        )
+        print(json.dumps(entry, indent=2, sort_keys=True))
         return 0
 
     if args.command == "ingest-brain-output":
