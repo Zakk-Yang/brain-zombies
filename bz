@@ -609,7 +609,7 @@ BRIEFEOF
         if [[ -n "$blocked_until" ]]; then
             initial_state="blocked"
             initial_action="waiting on dependency"
-            initial_needs_brain="unblock"
+            initial_needs_brain="no"
             initial_next_step="Wait for dependency or supervisor unblock."
         fi
         write_status_file \
@@ -734,7 +734,7 @@ START NOW."
 
         local cmd
         if [[ "$cli_cmd" == "claude" ]]; then
-            cmd="cd ${abs_work_dir} && claude --dangerously-skip-permissions"
+            cmd="cd $(shell_quote "$abs_work_dir") && claude --dangerously-skip-permissions"
             [[ -n "$model" ]] && cmd="$cmd --model $model"
             # Claude Code CLI uses --effort (low/medium/high/max), not --thinking
             if [[ -n "$thinking" && "$thinking" != "None" && "$thinking" != "off" ]]; then
@@ -750,11 +750,11 @@ START NOW."
             fi
             cmd="$cmd -p \"\$(cat ${abs_prompt_file})\""
         elif [[ "$cli_cmd" == "codex" ]]; then
-            cmd="cd ${abs_work_dir} && codex exec --full-auto"
+            cmd="cd $(shell_quote "$abs_work_dir") && codex exec --full-auto --add-dir $(shell_quote "$project_root_abs")"
             [[ -n "$model" ]] && cmd="$cmd --model $model"
             cmd="$cmd \"\$(cat ${abs_prompt_file})\""
         else
-            cmd="cd ${abs_work_dir} && ${cli_cmd} \"\$(cat ${abs_prompt_file})\""
+            cmd="cd $(shell_quote "$abs_work_dir") && ${cli_cmd} \"\$(cat ${abs_prompt_file})\""
         fi
 
         tmux new-session -d -s "$sess" -x 200 -y 50
@@ -1159,9 +1159,9 @@ Then read your previous work in the worktree and your memory file $(agent_memory
             [[ -n "$model" ]] && cmd="$cmd --model $model"
             cmd="$cmd -p '${prompt}'"
         elif [[ "$cli_cmd" == "codex" ]]; then
-            cmd="cd $(realpath "$work_dir") && codex"
+            cmd="cd $(shell_quote "$(realpath "$work_dir")") && codex exec --full-auto --add-dir $(shell_quote "$(pwd -P)")"
             [[ -n "$model" ]] && cmd="$cmd --model $model"
-            cmd="$cmd --full-auto -q '${prompt}'"
+            cmd="$cmd '${prompt}'"
         else
             cmd="cd $(realpath "$work_dir") && ${cli_cmd} '${prompt}'"
         fi

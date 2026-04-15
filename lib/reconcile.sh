@@ -829,7 +829,7 @@ Then execute the action immediately."
             if [[ "$z_cli" == "claude" ]]; then
                 restart_cmd="cd ${abs_work_dir} && claude --dangerously-skip-permissions --model ${z_model} -p \"\$(cat ${restart_prompt_file})\""
             elif [[ "$z_cli" == "codex" ]]; then
-                restart_cmd="cd ${abs_work_dir} && codex exec --full-auto --model ${z_model} \"\$(cat ${restart_prompt_file})\""
+                restart_cmd="cd ${abs_work_dir} && codex exec --full-auto --add-dir ${PROJECT_ROOT} --model ${z_model} \"\$(cat ${restart_prompt_file})\""
             else
                 restart_cmd="cd ${abs_work_dir} && ${z_cli} \"\$(cat ${restart_prompt_file})\""
             fi
