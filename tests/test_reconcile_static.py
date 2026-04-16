@@ -55,6 +55,50 @@ class ReconcileStaticTests(unittest.TestCase):
         self.assertIn('pending="${pending} ${agent_id}"', review_body)
         self.assertNotIn('[[ ! -f "${agent_dir}/DECISION.md" ]]', review_body)
 
+    def test_reconcile_releases_satisfied_dependencies_in_main_loop(self):
+        script = (REPO_ROOT / "lib" / "reconcile.sh").read_text()
+        release_body = script[
+            script.index("release_satisfied_dependencies() {") : script.index("# ── Wake Triggers")
+        ]
+
+        self.assertIn("release_satisfied_dependencies()", script)
+        self.assertIn('dependencies_satisfied "$depends" || continue', release_body)
+        self.assertIn('--kind unblock', release_body)
+        self.assertIn('--phase working', release_body)
+        self.assertIn('deliver_action_to_agent "$agent_id"', release_body)
+        self.assertNotIn('pending_action', release_body)
+        self.assertIn('deliver_action_to_agent "$agent_id" >&2', release_body)
+        self.assertIn('if released="$(release_satisfied_dependencies)"; then', script)
+
+    def test_review_prompt_forbids_tool_use(self):
+        script = (REPO_ROOT / "lib" / "reconcile.sh").read_text()
+
+        self.assertIn(
+            "- use only the supplied context; do not run tools, inspect git, or execute commands",
+            script,
+        )
+
+    def test_crash_check_only_applies_to_active_phases(self):
+        script = (REPO_ROOT / "lib" / "reconcile.sh").read_text()
+        crash_body = script[
+            script.index("check_zombie_alive() {") : script.index("# Check 3: active zombie missed heartbeat")
+        ]
+
+        self.assertIn("phase_expects_live_session()", script)
+        self.assertIn('phase_expects_live_session "$state" || continue', crash_body)
+        self.assertNotIn('[[ "$state" == "done" || "$state" == "finished" ]]', crash_body)
+
+    def test_reconcile_enforces_total_runtime_budget_and_gates_proactive_wakes(self):
+        script = (REPO_ROOT / "lib" / "reconcile.sh").read_text()
+
+        self.assertIn("total_minutes_budget_reason()", script)
+        self.assertIn("shutdown_budget_exhausted_run()", script)
+        self.assertIn('if budget_reason="$(total_minutes_budget_reason 2>/dev/null)"; then', script)
+        self.assertIn('shutdown_budget_exhausted_run "$budget_reason"', script)
+        self.assertIn("has_actionable_proactive_targets()", script)
+        self.assertIn('if proactive_targets="$(has_actionable_proactive_targets 2>/dev/null)"; then', script)
+        self.assertIn('Skipping proactive brain wake; no actionable targets remain.', script)
+
 
 if __name__ == "__main__":
     unittest.main()

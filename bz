@@ -105,6 +105,32 @@ shell_quote() {
     printf '%q' "$1"
 }
 
+parse_blocked_until_dependencies() {
+    local text="$1"
+    [[ -n "$text" ]] || return 0
+
+    text="$(printf '%s' "$text" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+    text="$(printf '%s' "$text" | sed -E 's/[[:space:]]+sets?[[:space:]]+State:[[:space:]]*done$//I')"
+    text="$(printf '%s' "$text" | sed -E 's/[[:space:]]+and[[:space:]]+/, /Ig')"
+
+    printf '%s\n' "$text" \
+        | tr ',' '\n' \
+        | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
+        | sed '/^$/Id; /^none$/Id'
+}
+
+join_csv_lines() {
+    awk '
+        NF {
+            if (seen) {
+                printf ", "
+            }
+            printf "%s", $0
+            seen = 1
+        }
+    '
+}
+
 kill_tmux_session_tree() {
     local sess="$1"
 
@@ -663,7 +689,8 @@ BRIEFEOF
         # Write initial STATUS.md
         local dependency_hint="none"
         if [[ -n "$blocked_until" ]]; then
-            dependency_hint="$(printf '%s' "$blocked_until" | awk '{print $1}')"
+            dependency_hint="$(parse_blocked_until_dependencies "$blocked_until" | join_csv_lines)"
+            [[ -z "$dependency_hint" ]] && dependency_hint="none"
         fi
         local initial_state="starting"
         local initial_action="reading brief"

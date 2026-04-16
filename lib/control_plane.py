@@ -725,6 +725,16 @@ def sync_agent_from_status(root: Path, agent_id: str) -> dict[str, Any]:
     fields = read_status_markdown(path)
     existing = load_state(root, agent_id)
     parsed_updated = parse_timestamp(fields.get("last updated")) or datetime.fromtimestamp(path.stat().st_mtime).astimezone().replace(microsecond=0).isoformat()
+    pending = latest_pending_action(root, agent_id)
+    pending_created = parse_timestamp(pending.get("created_at")) if pending else None
+    existing_updated = parse_timestamp(existing.get("updated_at")) if existing else None
+
+    # Preserve newer canonical state while a later pending action is still waiting
+    # for the zombie to acknowledge it. Otherwise an older STATUS.md can roll a
+    # brain/system decision back to a stale phase on the next sync.
+    if pending_created and pending_created > parsed_updated and existing_updated and existing_updated >= pending_created:
+        return existing
+
     state = {
         "agent_id": agent_id,
         "role": "brain" if agent_id == "supervisor" else "agent",

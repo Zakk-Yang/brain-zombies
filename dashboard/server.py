@@ -8,6 +8,7 @@ import http.server
 import json
 import os
 import re
+import signal
 import socket
 import shlex
 import shutil
@@ -1297,6 +1298,11 @@ def service_session_name(service: str, config: dict | None = None) -> str:
     return f"bz-{project_name_from_config(config or read_yaml())}-{service}"
 
 
+def active_session_names_for_project(project_name: str, config: dict | None = None) -> list[str]:
+    dashboard_session = service_session_name("dashboard", config)
+    return [name for name in session_names_for_project(project_name) if name != dashboard_session]
+
+
 def tmux_session_exists(session_name: str) -> bool:
     try:
         return subprocess.run(
@@ -1321,28 +1327,118 @@ def reconcile_running() -> bool:
 
 
 def has_active_run(config: dict | None = None) -> bool:
-    project_name = project_name_from_config(config or read_yaml())
-    return reconcile_running() or bool(session_names_for_project(project_name))
+    current = config or read_yaml()
+    project_name = project_name_from_config(current)
+    return reconcile_running() or bool(active_session_names_for_project(project_name, current))
+
+
+def _child_pids(pid: int) -> list[int]:
+    try:
+        result = subprocess.run(
+            ["pgrep", "-P", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return []
+    if result.returncode not in {0, 1}:
+        return []
+    children = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            children.append(int(line))
+        except ValueError:
+            continue
+    return children
+
+
+def _kill_process_tree(pid: int, sig: int) -> list[int]:
+    seen: set[int] = set()
+    order: list[int] = []
+    stack = [pid]
+
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        order.append(current)
+        stack.extend(_child_pids(current))
+
+    killed: list[int] = []
+    for current in reversed(order):
+        try:
+            os.kill(current, sig)
+            killed.append(current)
+        except (ProcessLookupError, OSError):
+            continue
+    return killed
+
+
+def _pane_pids(session_name: str) -> list[int]:
+    try:
+        result = subprocess.run(
+            ["tmux", "list-panes", "-t", session_name, "-F", "#{pane_pid}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+    except Exception:
+        return []
+    pane_pids: list[int] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            pane_pids.append(int(line))
+        except ValueError:
+            continue
+    return pane_pids
+
+
+def _kill_tmux_session_tree(session_name: str) -> list[str]:
+    killed: list[str] = []
+    for pane_pid in _pane_pids(session_name):
+        for signal_value in (signal.SIGTERM, signal.SIGKILL):
+            for pid in _kill_process_tree(pane_pid, signal_value):
+                killed.append(f"pid {pid}")
+    try:
+        subprocess.run(["tmux", "kill-session", "-t", session_name], capture_output=True, timeout=5)
+    except Exception:
+        pass
+    killed.append(f"session: {session_name}")
+    return killed
 
 
 def _handle_teardown():
-    """Kill all tmux sessions and reconcile loop for this project."""
+    """Kill all background tmux sessions and reconcile loop for this project."""
     killed = []
-    project_name = project_name_from_config(read_yaml())
+    current = read_yaml()
+    project_name = project_name_from_config(current)
 
     pid_file = BZ_DIR / "reconcile.pid"
     if pid_file.exists():
         try:
             pid = int(pid_file.read_text().strip())
-            os.kill(pid, 9)
-            killed.append(f"reconcile (PID {pid})")
+            for signal_value in (signal.SIGTERM, signal.SIGKILL):
+                for killed_pid in _kill_process_tree(pid, signal_value):
+                    entry = f"reconcile pid {killed_pid}"
+                    if entry not in killed:
+                        killed.append(entry)
         except (ProcessLookupError, ValueError, OSError):
             pass
         pid_file.unlink(missing_ok=True)
 
-    for sess in session_names_for_project(project_name):
-        subprocess.run(["tmux", "kill-session", "-t", sess], capture_output=True)
-        killed.append(f"session: {sess}")
+    for sess in active_session_names_for_project(project_name, current):
+        for entry in _kill_tmux_session_tree(sess):
+            if entry not in killed:
+                killed.append(entry)
 
     return {"status": "ok", "killed": killed}
 

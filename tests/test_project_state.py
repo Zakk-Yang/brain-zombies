@@ -69,6 +69,19 @@ class ProjectStateTests(unittest.TestCase):
             )
         )
 
+    def load_dashboard_module(self, root: Path):
+        server_path = REPO_ROOT / "dashboard" / "server.py"
+        old_argv = sys.argv[:]
+        try:
+            sys.argv = ["server.py", "3333", str(root)]
+            spec = importlib.util.spec_from_file_location("dashboard_server_test", server_path)
+            module = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(module)
+            return module
+        finally:
+            sys.argv = old_argv
+
     def test_project_init_creates_canonical_layout(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -245,6 +258,63 @@ class ProjectStateTests(unittest.TestCase):
             self.assertIn("Reason: User reported the game could not start.", chatlog)
             self.assertIn("Start the game loop and verify the controls.", chatlog)
 
+    def test_sync_status_preserves_newer_canonical_state_behind_pending_action(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write_config(root)
+            project_init.initialize_project(root, auto_yes=True)
+
+            control_plane.queue_action(
+                root,
+                from_actor="brain",
+                to_agent="dev",
+                kind="accept",
+                summary="Accepted rewritten batch.",
+                details="Mark the work done.",
+                reason="Review passed.",
+            )
+            control_plane.write_state(
+                root,
+                agent_id="dev",
+                phase="done",
+                action="waiting for merge or follow-up",
+                summary="Brain accepted the work.",
+                depends_on=[],
+                needs_brain="no",
+                next_step="none",
+                blocker="none",
+                files_touched=["src/app.py"],
+                updated_by="brain",
+                source="brain-review",
+            )
+
+            old_timestamp = (datetime.now().astimezone() - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M")
+            (root / ".bz/agents/dev/STATUS.md").write_text(
+                "\n".join(
+                    [
+                        "# STATUS.md",
+                        "State: ready-for-review",
+                        "Action: waiting for review",
+                        "Summary: Old review request.",
+                        "Files touched: src/app.py",
+                        "Depends on: none",
+                        "Needs brain: review",
+                        "Next step: Brain review",
+                        "Blocker: none",
+                        "Memory: .bz/project/memories/dev_mem.md",
+                        "Updated by: agent",
+                        f"Last updated: {old_timestamp}",
+                        "",
+                    ]
+                )
+            )
+
+            state = control_plane.sync_agent_from_status(root, "dev")
+
+            self.assertEqual(state["phase"], "done")
+            self.assertEqual(state["needs_brain"], "no")
+            self.assertEqual(state["updated_by"], "brain")
+
     def test_zombie_attention_state_is_recorded_in_agent_chatlog_once(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -318,22 +388,64 @@ class ProjectStateTests(unittest.TestCase):
             (root / ".bz/project/memories/dev_mem.md").write_text("dev memory body\n")
             (root / ".bz/project/chatlogs/brain_dev_chatlog.md").write_text("brain-dev chat\n")
 
-            server_path = REPO_ROOT / "dashboard" / "server.py"
-            old_argv = sys.argv[:]
-            try:
-                sys.argv = ["server.py", "3333", str(root)]
-                spec = importlib.util.spec_from_file_location("dashboard_server_test", server_path)
-                module = importlib.util.module_from_spec(spec)
-                assert spec.loader is not None
-                spec.loader.exec_module(module)
-                data = module.build_dashboard_data()
-            finally:
-                sys.argv = old_argv
+            module = self.load_dashboard_module(root)
+            data = module.build_dashboard_data()
 
             zombie = data["zombies"][0]
             self.assertEqual(zombie["memory"]["content"], "dev memory body\n")
             self.assertEqual(zombie["chatlog"]["content"], "brain-dev chat\n")
             self.assertIn("shared_mem.md", data["brain"]["shared_memory"]["path"])
+
+    def test_dashboard_active_run_ignores_dashboard_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write_config(root)
+            project_init.initialize_project(root, auto_yes=True)
+
+            module = self.load_dashboard_module(root)
+            module.session_names_for_project = lambda project_name: ["bz-demo-dashboard"]
+            module.reconcile_running = lambda: False
+
+            self.assertFalse(module.has_active_run(module.read_yaml()))
+
+            module.session_names_for_project = lambda project_name: ["bz-demo-dashboard", "bz-demo-dev"]
+            self.assertTrue(module.has_active_run(module.read_yaml()))
+
+    def test_dashboard_teardown_skips_dashboard_session_and_kills_background_sessions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write_config(root)
+            project_init.initialize_project(root, auto_yes=True)
+
+            module = self.load_dashboard_module(root)
+            (root / ".bz/reconcile.pid").write_text("12345\n")
+
+            module.active_session_names_for_project = lambda project_name, config=None: [
+                "bz-demo-nerve",
+                "bz-demo-dev",
+            ]
+
+            killed_processes = []
+            killed_sessions = []
+
+            def fake_kill_process_tree(pid: int, sig: int):
+                killed_processes.append((pid, sig))
+                return [pid]
+
+            def fake_kill_tmux_session_tree(session_name: str):
+                killed_sessions.append(session_name)
+                return [f"session: {session_name}"]
+
+            module._kill_process_tree = fake_kill_process_tree
+            module._kill_tmux_session_tree = fake_kill_tmux_session_tree
+
+            payload = module._handle_teardown()
+
+            self.assertEqual(payload["status"], "ok")
+            self.assertIn((12345, module.signal.SIGTERM), killed_processes)
+            self.assertIn((12345, module.signal.SIGKILL), killed_processes)
+            self.assertEqual(killed_sessions, ["bz-demo-nerve", "bz-demo-dev"])
+            self.assertFalse((root / ".bz/reconcile.pid").exists())
 
 
 if __name__ == "__main__":

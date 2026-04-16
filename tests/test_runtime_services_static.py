@@ -68,6 +68,14 @@ class RuntimeServicesStaticTests(unittest.TestCase):
         self.assertIn("Max brain retry actions", index)
         self.assertIn("Max review attempts", index)
 
+    def test_launcher_tracks_multiple_blocked_dependencies(self):
+        script = (REPO_ROOT / "bz").read_text()
+
+        self.assertIn("parse_blocked_until_dependencies()", script)
+        self.assertIn("join_csv_lines()", script)
+        self.assertIn('dependency_hint="$(parse_blocked_until_dependencies "$blocked_until" | join_csv_lines)"', script)
+        self.assertNotIn("paste -sd ', ' -", script)
+
 
 if __name__ == "__main__":
     unittest.main()
