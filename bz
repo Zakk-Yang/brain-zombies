@@ -118,6 +118,54 @@ kill_tmux_session_tree() {
     tmux kill-session -t "$sess" 2>/dev/null || true
 }
 
+wait_dashboard_ready() {
+    local url="$1"
+
+    if ! command -v curl >/dev/null 2>&1; then
+        return 0
+    fi
+
+    for _ in {1..60}; do
+        if curl -fsS --max-time 1 "${url}/api/health" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.25
+    done
+
+    return 1
+}
+
+open_dashboard_url() {
+    local url="$1"
+
+    if [[ "${BZ_NO_OPEN:-0}" == "1" || "${CI:-}" == "true" ]]; then
+        return 1
+    fi
+
+    if command -v wslview >/dev/null 2>&1; then
+        (wslview "$url" >/dev/null 2>&1 &)
+        return 0
+    fi
+    if command -v xdg-open >/dev/null 2>&1; then
+        (xdg-open "$url" >/dev/null 2>&1 &)
+        return 0
+    fi
+    if command -v open >/dev/null 2>&1; then
+        (open "$url" >/dev/null 2>&1 &)
+        return 0
+    fi
+    if command -v gio >/dev/null 2>&1; then
+        (gio open "$url" >/dev/null 2>&1 &)
+        return 0
+    fi
+    if command -v cmd.exe >/dev/null 2>&1; then
+        (cmd.exe /C start "" "$url" >/dev/null 2>&1 &)
+        return 0
+    fi
+
+    return 1
+}
+
 start_reconcile_loop() {
     local project_root_abs="$1"
     local reconcile_pid_file="${BZ_DIR}/reconcile.pid"
@@ -547,13 +595,16 @@ for i, a in enumerate(d.get('agents', [])):
 
     for agent_id in "${agent_ids[@]}"; do
 
-        local runtime cli_cmd model task focus blocked_until thinking
+        local runtime cli_cmd model task focus blocked_until thinking max_iterations
         runtime="$(read_yaml "agents.${agent_index}.runtime" < /dev/null)"
         model="$(read_yaml "agents.${agent_index}.model" < /dev/null)"
         task="$(read_yaml "agents.${agent_index}.task" < /dev/null)"
         focus="$(read_yaml "agents.${agent_index}.focus" < /dev/null)"
         blocked_until="$(read_yaml "agents.${agent_index}.blocked_until" < /dev/null)"
         thinking="$(read_yaml "agents.${agent_index}.thinking" < /dev/null)"
+        max_iterations="$(read_yaml "agents.${agent_index}.max_iterations" < /dev/null)"
+        [[ -z "$max_iterations" || "$max_iterations" == "None" ]] && max_iterations="$(read_yaml "supervisor.max_agent_iterations" < /dev/null)"
+        [[ -z "$max_iterations" || "$max_iterations" == "None" ]] && max_iterations="5"
 
         case "$runtime" in
             claude|claude-code) cli_cmd="claude" ;;
@@ -605,6 +656,7 @@ ${focus}
 - Record durable facts/handoffs in the control plane with .bz/bin/bzctl add-memory --owner agent:${agent_id} ...
 - When you need supervisor help, set Needs brain: review|unblock|redirect and explain why in Blocker/Next step
 - Set State: ready-for-review and Needs brain: review when you believe your task is complete
+- Your automatic review-attempt budget is ${max_iterations} ready-for-review submissions; if exhausted, stop and wait for human budget extension
 $([ -n "$blocked_until" ] && echo "- You are BLOCKED until: ${blocked_until}. Set State: blocked until the condition is met.")
 BRIEFEOF
 
@@ -707,6 +759,7 @@ CRITICAL RULES:
    - Set Needs brain: unblock if blocked, redirect if you need new instructions, review when finished, otherwise no
    - Set State: ready-for-review when you believe your task is complete (brain will confirm)
    - Only the brain sets State: done after reviewing your work
+   - Your automatic review-attempt budget is ${max_iterations}; if the control plane reports budget exhausted, stop and wait for human budget extension
 8. If a brain or human message arrives, immediately re-read .bz/control/contexts/${agent_id}.md and .bz/control/agents/${agent_id}/latest-action.md before acting
 
 CONTEXT MANAGEMENT — keep your memory lean:
@@ -996,6 +1049,7 @@ cmd_teardown() {
 cmd_dashboard() {
     require_config
     local port="${1:-3333}"
+    local url="http://localhost:${port}"
     local dash_pid_file="${BZ_DIR}/dashboard.pid"
     local bz_exec
     bz_exec="$(realpath "${BASH_SOURCE[0]}")"
@@ -1019,7 +1073,16 @@ cmd_dashboard() {
     local cmd
     cmd="cd $(shell_quote "$project_root_abs") && echo \$\$ > $(shell_quote "$dash_pid_file") && exec python3 $(shell_quote "${SCRIPT_DIR}/dashboard/server.py") $(shell_quote "$port") $(shell_quote "$project_root_abs") $(shell_quote "$bz_exec") >> $(shell_quote "$dashboard_log") 2>&1"
     tmux new-session -d -s "$dashboard_session" -x 160 -y 40 "$cmd"
-    ok "Dashboard at http://localhost:${port} → tmux: ${dashboard_session}"
+    if wait_dashboard_ready "$url"; then
+        ok "Dashboard at ${url} → tmux: ${dashboard_session}"
+    else
+        warn "Dashboard tmux session started but ${url} did not respond yet. Check ${dashboard_log}."
+    fi
+    if open_dashboard_url "$url"; then
+        ok "Opened dashboard in browser"
+    else
+        info "Open ${url} in your browser"
+    fi
 }
 
 # ── CLEAN ────────────────────────────────────────

@@ -170,10 +170,16 @@ def scheduler_policy(config: dict[str, Any]) -> str:
     supervisor = config.get("supervisor", {}) or {}
     heartbeat = int(supervisor.get("zombie_heartbeat_mins", 10) or 10)
     proactive = int(supervisor.get("proactive_check_mins", 15) or 15)
+    max_brain_reviews = int(supervisor.get("max_brain_reviews", 8) or 0)
+    max_agent_restarts = int(supervisor.get("max_agent_restarts", 2) or 0)
+    max_total_minutes = int(supervisor.get("max_total_minutes", 45) or 0)
     return "\n".join(
         [
             f"zombie_heartbeat_mins: {heartbeat}",
             f"proactive_check_mins: {proactive}",
+            f"max_brain_reviews: {max_brain_reviews}",
+            f"max_agent_restarts: {max_agent_restarts}",
+            f"max_total_minutes: {max_total_minutes}",
             "stale_action: status-check",
             "second_miss: wake-brain",
         ]
@@ -191,7 +197,14 @@ def initialize_project(
     supervisor = config.setdefault("supervisor", {})
     supervisor.setdefault("zombie_heartbeat_mins", 10)
     supervisor.setdefault("proactive_check_mins", 15)
+    supervisor.setdefault("max_brain_reviews", 8)
+    supervisor.setdefault("max_agent_restarts", 2)
+    supervisor.setdefault("max_total_minutes", 45)
+    supervisor.setdefault("max_agent_iterations", 5)
     agents = config.get("agents", []) or []
+    for agent in agents:
+        if isinstance(agent, dict):
+            agent.setdefault("max_iterations", supervisor.get("max_agent_iterations", 5))
 
     project_name = str(project.get("name") or root.name)
     brief = str(project.get("brief") or "")

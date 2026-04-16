@@ -21,6 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+import yaml
+
 from project_layout import (
     agent_memory_path as project_agent_memory_path,
     agent_output_dir,
@@ -42,6 +44,10 @@ STATE_VERSION = 1
 ACTION_VERSION = 1
 MEMORY_VERSION = 1
 EVENT_VERSION = 1
+DEFAULT_MAX_BRAIN_REVIEWS = 8
+DEFAULT_MAX_AGENT_RESTARTS = 2
+DEFAULT_MAX_TOTAL_MINUTES = 45
+DEFAULT_MAX_AGENT_ITERATIONS = 5
 
 PHASE_ALIASES = {
     "starting": "starting",
@@ -117,6 +123,226 @@ def parse_csv(value: str | None) -> list[str]:
 def csv_or_none(values: Iterable[str]) -> str:
     items = [flatten_text(v) for v in values if flatten_text(v)]
     return ", ".join(items) if items else "none"
+
+
+def read_config(root: Path) -> dict[str, Any]:
+    path = root / "bz.yaml"
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def positive_int(value: Any, default: int, minimum: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(parsed, minimum)
+
+
+def budget_limits(root: Path) -> dict[str, Any]:
+    config = read_config(root)
+    supervisor = config.get("supervisor", {}) or {}
+    default_agent_iterations = positive_int(
+        supervisor.get("max_agent_iterations"),
+        DEFAULT_MAX_AGENT_ITERATIONS,
+    )
+    agents: dict[str, dict[str, int]] = {}
+    for agent in config.get("agents", []) or []:
+        if not isinstance(agent, dict):
+            continue
+        agent_id = flatten_text(agent.get("id"))
+        if not agent_id:
+            continue
+        agents[agent_id] = {
+            "max_iterations": positive_int(
+                agent.get("max_iterations"),
+                default_agent_iterations,
+            )
+        }
+    return {
+        "max_brain_reviews": positive_int(
+            supervisor.get("max_brain_reviews"),
+            DEFAULT_MAX_BRAIN_REVIEWS,
+        ),
+        "max_agent_restarts": positive_int(
+            supervisor.get("max_agent_restarts"),
+            DEFAULT_MAX_AGENT_RESTARTS,
+        ),
+        "max_total_minutes": positive_int(
+            supervisor.get("max_total_minutes"),
+            DEFAULT_MAX_TOTAL_MINUTES,
+        ),
+        "max_agent_iterations": default_agent_iterations,
+        "agents": agents,
+    }
+
+
+def event_kind(event: dict[str, Any]) -> str:
+    payload = event.get("payload", {})
+    if isinstance(payload, dict):
+        return flatten_text(payload.get("kind")).lower()
+    return ""
+
+
+def event_target_agent(event: dict[str, Any]) -> str:
+    target = flatten_text(event.get("target"))
+    return target.split(":", 1)[1] if target.startswith("agent:") else target
+
+
+def event_phase(event: dict[str, Any]) -> str:
+    payload = event.get("payload", {})
+    if isinstance(payload, dict):
+        return normalize_phase(flatten_text(payload.get("phase")))
+    return ""
+
+
+def budget_event_counts(root: Path) -> dict[str, Any]:
+    events = load_events(root)
+    brain_reviews_used = 0
+    agent_iterations: dict[str, int] = {}
+    agent_restarts: dict[str, int] = {}
+    first_timestamp = ""
+    last_timestamp = ""
+
+    for event in events:
+        if not first_timestamp:
+            first_timestamp = flatten_text(event.get("timestamp"))
+        last_timestamp = flatten_text(event.get("timestamp")) or last_timestamp
+        event_type = flatten_text(event.get("type"))
+        source = flatten_text(event.get("source")).lower()
+        target = event_target_agent(event)
+        kind = event_kind(event)
+
+        if event_type == "action_queued" and source == "brain":
+            if kind and kind != "accept":
+                brain_reviews_used += 1
+            if target and kind == "restart":
+                agent_restarts[target] = agent_restarts.get(target, 0) + 1
+
+        if event_type == "state_changed" and target and event_phase(event) == "ready-for-review":
+            agent_iterations[target] = agent_iterations.get(target, 0) + 1
+
+    return {
+        "brain_reviews_used": brain_reviews_used,
+        "agent_iterations": agent_iterations,
+        "agent_restarts": agent_restarts,
+        "first_timestamp": first_timestamp,
+        "last_timestamp": last_timestamp,
+    }
+
+
+def elapsed_minutes_between_events(first_timestamp: str, last_timestamp: str = "") -> int:
+    if not first_timestamp:
+        return 0
+    try:
+        started = datetime.fromisoformat(first_timestamp)
+    except ValueError:
+        return 0
+    ended = datetime.now().astimezone()
+    if last_timestamp:
+        try:
+            ended = datetime.fromisoformat(last_timestamp)
+        except ValueError:
+            pass
+    return max(0, int((ended - started).total_seconds() // 60))
+
+
+def budget_status(root: Path) -> dict[str, Any]:
+    limits = budget_limits(root)
+    counts = budget_event_counts(root)
+    brain_max = limits["max_brain_reviews"]
+    total_max = limits["max_total_minutes"]
+    agent_ids = [agent_id for agent_id in list_agent_ids(root) if agent_id != "supervisor"]
+    states = [load_state(root, agent_id) for agent_id in agent_ids]
+    run_complete = bool(states) and all((state or {}).get("phase") == "done" for state in states)
+    elapsed = elapsed_minutes_between_events(
+        counts["first_timestamp"],
+        counts["last_timestamp"] if run_complete else "",
+    )
+    agents: dict[str, dict[str, Any]] = {}
+
+    for agent_id in agent_ids:
+        agent_limit = limits["agents"].get(agent_id, {})
+        iteration_max = positive_int(
+            agent_limit.get("max_iterations"),
+            limits["max_agent_iterations"],
+        )
+        restart_max = limits["max_agent_restarts"]
+        iterations_used = counts["agent_iterations"].get(agent_id, 0)
+        restarts_used = counts["agent_restarts"].get(agent_id, 0)
+        agents[agent_id] = {
+            "iterations": {
+                "used": iterations_used,
+                "max": iteration_max,
+                "remaining": None if iteration_max == 0 else max(0, iteration_max - iterations_used),
+                "exhausted": iteration_max > 0 and iterations_used >= iteration_max,
+            },
+            "restarts": {
+                "used": restarts_used,
+                "max": restart_max,
+                "remaining": None if restart_max == 0 else max(0, restart_max - restarts_used),
+                "exhausted": restart_max > 0 and restarts_used >= restart_max,
+            },
+        }
+
+    return {
+        "brain_reviews": {
+            "used": counts["brain_reviews_used"],
+            "max": brain_max,
+            "remaining": None if brain_max == 0 else max(0, brain_max - counts["brain_reviews_used"]),
+            "exhausted": brain_max > 0 and counts["brain_reviews_used"] >= brain_max,
+        },
+        "total_minutes": {
+            "used": elapsed,
+            "max": total_max,
+            "remaining": None if total_max == 0 else max(0, total_max - elapsed),
+            "exhausted": total_max > 0 and elapsed >= total_max,
+        },
+        "agents": agents,
+        "exhausted": (
+            (brain_max > 0 and counts["brain_reviews_used"] >= brain_max)
+            or (total_max > 0 and elapsed >= total_max)
+            or any(
+                agent["iterations"]["exhausted"] or agent["restarts"]["exhausted"]
+                for agent in agents.values()
+            )
+        ),
+    }
+
+
+def budget_context_lines(root: Path, agent_id: str | None = None) -> list[str]:
+    status = budget_status(root)
+
+    def fmt(value: dict[str, Any]) -> str:
+        maximum = value.get("max", 0)
+        if not maximum:
+            return f"{value.get('used', 0)}/unlimited"
+        suffix = " exhausted" if value.get("exhausted") else ""
+        return f"{value.get('used', 0)}/{maximum}{suffix}"
+
+    lines = [
+        f"- brain_reviews: {fmt(status.get('brain_reviews', {}))}",
+        f"- total_minutes: {fmt(status.get('total_minutes', {}))}",
+    ]
+    agents = status.get("agents", {})
+    if agent_id:
+        agent = agents.get(agent_id, {})
+        if agent:
+            lines.append(f"- {agent_id} iterations: {fmt(agent.get('iterations', {}))}")
+            lines.append(f"- {agent_id} restarts: {fmt(agent.get('restarts', {}))}")
+        return lines
+
+    for current_id in sorted(agents):
+        agent = agents[current_id]
+        lines.append(
+            f"- {current_id}: iterations={fmt(agent.get('iterations', {}))}, restarts={fmt(agent.get('restarts', {}))}"
+        )
+    return lines
 
 
 def ensure_parent(path: Path) -> None:
@@ -530,6 +756,60 @@ def sync_all(root: Path) -> None:
     refresh_contexts(root)
 
 
+def agent_iteration_budget_exhaustion(root: Path, agent_id: str) -> str:
+    agent_budget = budget_status(root).get("agents", {}).get(agent_id, {})
+    iterations = agent_budget.get("iterations", {})
+    max_iterations = iterations.get("max", 0)
+    used = iterations.get("used", 0)
+    if max_iterations and used >= max_iterations:
+        return f"max_iterations reached for {agent_id}: {used}/{max_iterations}"
+    return ""
+
+
+def brain_action_budget_exhaustion(root: Path, agent_id: str, kind: str) -> str:
+    status = budget_status(root)
+    normalized_kind = flatten_text(kind).lower()
+    if normalized_kind != "accept":
+        brain = status.get("brain_reviews", {})
+        if brain.get("exhausted"):
+            return f"max_brain_reviews reached: {brain.get('used', 0)}/{brain.get('max', 0)}"
+    if normalized_kind == "restart":
+        restarts = status.get("agents", {}).get(agent_id, {}).get("restarts", {})
+        if restarts.get("exhausted"):
+            return f"max_agent_restarts reached for {agent_id}: {restarts.get('used', 0)}/{restarts.get('max', 0)}"
+    return ""
+
+
+def block_agent_for_budget(root: Path, agent_id: str, reason: str) -> dict[str, Any]:
+    current = load_state(root, agent_id)
+    if current.get("phase") == "blocked" and "budget exhausted" in flatten_text(current.get("blocker")).lower():
+        return current
+    state = write_state(
+        root,
+        agent_id=agent_id,
+        phase="blocked",
+        action="budget exhausted",
+        summary="Budget exhausted; automatic retries stopped.",
+        depends_on=current.get("depends_on", []),
+        needs_brain="no",
+        next_step="Human can extend the budget in bz.yaml or send an explicit follow-up.",
+        blocker=f"budget exhausted: {reason}",
+        files_touched=current.get("files_touched", []),
+        updated_by="system",
+        source="budget",
+    )
+    append_event(
+        root,
+        event_type="budget_exhausted",
+        source="system",
+        target=f"agent:{agent_id}",
+        summary=f"{agent_id} budget exhausted",
+        details=reason,
+        payload={"reason": reason},
+    )
+    return state
+
+
 def write_state(
     root: Path,
     agent_id: str,
@@ -545,10 +825,15 @@ def write_state(
     source: str = "control-plane",
 ) -> dict[str, Any]:
     existing = load_state(root, agent_id)
+    requested_phase = normalize_phase(phase or existing.get("phase") or "unknown")
+    if agent_id != "supervisor" and requested_phase == "ready-for-review":
+        budget_reason = agent_iteration_budget_exhaustion(root, agent_id)
+        if budget_reason:
+            return block_agent_for_budget(root, agent_id, budget_reason)
     state = {
         "agent_id": agent_id,
         "role": "brain" if agent_id == "supervisor" else "agent",
-        "phase": normalize_phase(phase or existing.get("phase") or "unknown"),
+        "phase": requested_phase,
         "action": flatten_text(action) or existing.get("action") or "waiting for next step",
         "summary": flatten_text(summary) or existing.get("summary") or "No summary.",
         "depends_on": depends_on if depends_on is not None else existing.get("depends_on", []),
@@ -648,6 +933,22 @@ def queue_action(
     replace_pending: bool = True,
 ) -> dict[str, Any]:
     ensure_layout(root, [to_agent])
+    if flatten_text(from_actor).lower() == "brain":
+        budget_reason = brain_action_budget_exhaustion(root, to_agent, kind)
+        if budget_reason:
+            block_agent_for_budget(root, to_agent, budget_reason)
+            return {
+                "id": f"budget-{uuid.uuid4().hex[:12]}",
+                "schema_version": ACTION_VERSION,
+                "created_at": now_iso(),
+                "from": from_actor,
+                "to": to_agent,
+                "kind": "budget-exhausted",
+                "status": "blocked",
+                "summary": "Budget exhausted; action was not queued.",
+                "details": budget_reason,
+                "reason": budget_reason,
+            }
     actions = load_actions(root, to_agent)
     if replace_pending:
         DuckDBStateStore(root).supersede_pending_actions(to_agent)
@@ -951,6 +1252,8 @@ def build_brain_context(root: Path) -> str:
     lines.extend(doc_excerpt(project_paths(root).target_md, max_lines=24))
     lines.extend(["", "## Brain Soul"])
     lines.extend(doc_excerpt(brain_soul_path(root), max_lines=24))
+    lines.extend(["", "## Budget"])
+    lines.extend(budget_context_lines(root))
     lines.extend([
         "",
         "## Attention Queue",
@@ -987,6 +1290,8 @@ def build_agent_context(root: Path, agent_id: str) -> str:
     lines.extend(doc_excerpt(project_paths(root).target_md, max_lines=18))
     lines.extend(["", "## Your Soul"])
     lines.extend(doc_excerpt(agent_soul_path(root, agent_id), max_lines=24))
+    lines.extend(["", "## Budget"])
+    lines.extend(budget_context_lines(root, agent_id))
     lines.extend(["", "## Your Plan"])
     lines.extend(doc_excerpt(agent_plan_path(root, agent_id), max_lines=24))
     lines.extend([
@@ -1115,7 +1420,7 @@ def ingest_brain_output(root: Path, output_text: str, mode: str = "", reason: st
                 summary = flatten_text(item.get("summary"))
                 details = item.get("details", "")
                 reason_text = flatten_text(item.get("reason")) or flatten_text(reason)
-                queue_action(
+                queued_action = queue_action(
                     root,
                     from_actor="brain",
                     to_agent=target,
@@ -1125,6 +1430,8 @@ def ingest_brain_output(root: Path, output_text: str, mode: str = "", reason: st
                     reason=reason_text,
                     replace_pending=True,
                 )
+                if queued_action.get("kind") == "budget-exhausted":
+                    continue
                 if kind == "accept":
                     current = load_state(root, target)
                     write_state(
@@ -1158,7 +1465,7 @@ def ingest_brain_output(root: Path, output_text: str, mode: str = "", reason: st
         kind = "guidance"
         summary = parts[1]
         details = " | ".join(parts[2:]) if len(parts) > 2 else ""
-        queue_action(
+        queued_action = queue_action(
             root,
             from_actor="brain",
             to_agent=target,
@@ -1168,7 +1475,8 @@ def ingest_brain_output(root: Path, output_text: str, mode: str = "", reason: st
             reason=reason,
             replace_pending=True,
         )
-        queued_targets.append(target)
+        if queued_action.get("kind") != "budget-exhausted":
+            queued_targets.append(target)
     if queued_targets:
         write_state(
             root,
@@ -1212,6 +1520,7 @@ def dashboard_state(root: Path, agent_id: str) -> dict[str, Any]:
         "last updated": iso_to_display(state.get("updated_at")),
         "pending_action": latest,
         "memory_count": memory_count,
+        "budget": budget_status(root).get("agents", {}).get(agent_id, {}),
     }
 
 
@@ -1300,6 +1609,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     event_parser.add_argument("--target", default="")
     event_parser.add_argument("--summary", default="")
     event_parser.add_argument("--details", default="")
+
+    budget_parser = sub.add_parser("budget-status", help="Print iteration/restart budget status")
+    budget_parser.add_argument("--format", choices=["json", "summary"], default="json")
 
     return parser.parse_args(argv)
 
@@ -1466,6 +1778,14 @@ def main(argv: list[str] | None = None) -> int:
             details=args.details,
         )
         refresh_contexts(root)
+        return 0
+
+    if args.command == "budget-status":
+        status = budget_status(root)
+        if args.format == "summary":
+            print("\n".join(budget_context_lines(root)))
+        else:
+            print(json.dumps(status, indent=2, sort_keys=True))
         return 0
 
     return 1

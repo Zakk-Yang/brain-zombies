@@ -27,6 +27,10 @@ bz status
 bz attach developer
 ```
 
+`bz new`, `bz launch`, and `bz dashboard` start the dashboard in tmux and try to open it in your browser automatically. Set `BZ_NO_OPEN=1` if you only want the URL printed.
+
+Budgets prevent runaway retry loops. New projects default to `max_brain_reviews: 8`, `max_agent_restarts: 2`, `max_total_minutes: 45`, and `max_agent_iterations: 5`; set any of those to `0` for unlimited.
+
 ## How It Works
 
 ```

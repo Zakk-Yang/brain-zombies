@@ -8,6 +8,7 @@ import http.server
 import json
 import os
 import re
+import socket
 import shlex
 import shutil
 import subprocess
@@ -135,6 +136,7 @@ def blank_agent(agent_id: str, runtime: str, model: str, task: str = "") -> dict
         "focus": [],
         "thinking": "",
         "role": "",
+        "max_iterations": 5,
         "blocked_until": "",
         "dependency_mode": "immediate",
         "dependency_target": "",
@@ -195,6 +197,10 @@ def preset_config(preset_id: str) -> dict:
             "thinking": "",
             "proactive_check_mins": 15,
             "zombie_heartbeat_mins": 10,
+            "max_brain_reviews": 8,
+            "max_agent_restarts": 2,
+            "max_total_minutes": 45,
+            "max_agent_iterations": 5,
         },
         "agents": agents,
         "git": {
@@ -345,6 +351,18 @@ def normalize_config(payload: dict | None) -> tuple[dict, list[str]]:
     supervisor["zombie_heartbeat_mins"] = sanitize_int(
         supervisor.get("zombie_heartbeat_mins", 10), 10
     )
+    supervisor["max_brain_reviews"] = sanitize_int(
+        supervisor.get("max_brain_reviews", 8), 8, minimum=0
+    )
+    supervisor["max_agent_restarts"] = sanitize_int(
+        supervisor.get("max_agent_restarts", 2), 2, minimum=0
+    )
+    supervisor["max_total_minutes"] = sanitize_int(
+        supervisor.get("max_total_minutes", 45), 45, minimum=0
+    )
+    supervisor["max_agent_iterations"] = sanitize_int(
+        supervisor.get("max_agent_iterations", 5), 5, minimum=0
+    )
     normalized["supervisor"] = supervisor
 
     git_in = copy.deepcopy(payload.get("git") or {})
@@ -381,6 +399,11 @@ def normalize_config(payload: dict | None) -> tuple[dict, list[str]]:
         agent["focus"] = normalize_focus(agent.get("focus", []))
         agent["thinking"] = str(agent.get("thinking", "") or "").strip()
         agent["role"] = str(agent.get("role", "") or "").strip()
+        agent["max_iterations"] = sanitize_int(
+            agent.get("max_iterations", supervisor["max_agent_iterations"]),
+            supervisor["max_agent_iterations"],
+            minimum=0,
+        )
         agent["blocked_until"] = resolve_blocked_until(agent)
         dependency_mode, dependency_target, custom_blocked_until = derive_dependency(
             agent["blocked_until"]
@@ -444,7 +467,17 @@ def config_to_yaml_payload(config: dict) -> dict:
     project = ordered_with_known_keys(config.get("project", {}) or {}, ["name", "brief"])
     supervisor = ordered_with_known_keys(
         config.get("supervisor", {}) or {},
-        ["runtime", "model", "thinking", "proactive_check_mins", "zombie_heartbeat_mins"],
+        [
+            "runtime",
+            "model",
+            "thinking",
+            "proactive_check_mins",
+            "zombie_heartbeat_mins",
+            "max_brain_reviews",
+            "max_agent_restarts",
+            "max_total_minutes",
+            "max_agent_iterations",
+        ],
     )
     if not str(supervisor.get("thinking", "") or "").strip():
         supervisor.pop("thinking", None)
@@ -465,7 +498,17 @@ def config_to_yaml_payload(config: dict) -> dict:
         agents_out.append(
             ordered_with_known_keys(
                 agent,
-                ["id", "runtime", "model", "task", "focus", "blocked_until", "thinking", "role"],
+                [
+                    "id",
+                    "runtime",
+                    "model",
+                    "task",
+                    "focus",
+                    "blocked_until",
+                    "thinking",
+                    "role",
+                    "max_iterations",
+                ],
             )
         )
 
@@ -1012,6 +1055,7 @@ def build_dashboard_data():
     project = config.get("project", {})
     supervisor = config.get("supervisor", {})
     agents_config = config.get("agents", [])
+    budget = control_plane.budget_status(PROJECT_ROOT) if run_state_exists() else {}
 
     agent_ids = {agent.get("id", "") for agent in agents_config}
     branch_args = []
@@ -1108,6 +1152,7 @@ def build_dashboard_data():
             "commit_count": len(commits),
             "commits": commits[:5],
             "latest_message": status.get("summary", ""),
+            "budget": (budget.get("agents", {}) or {}).get(aid, {}),
         }
 
         if agent_config.get("role") == "iterator":
@@ -1159,6 +1204,7 @@ def build_dashboard_data():
             "elapsed_seconds": elapsed,
             "elapsed_display": f"{elapsed // 60}m {elapsed % 60}s",
             "total_cost": round(brain_cost + total_cost, 4),
+            "budget_exhausted": bool(budget.get("exhausted")),
         },
         "brain": {
             "runtime": supervisor.get("runtime", ""),
@@ -1178,8 +1224,13 @@ def build_dashboard_data():
             "memory": read_markdown_artifact(memory_path("supervisor")),
             "shared_memory": read_markdown_artifact(shared_memory_path()),
             "chatlog": read_markdown_artifact(chatlog_path("supervisor")),
+            "budget": {
+                "brain_reviews": budget.get("brain_reviews", {}),
+                "total_minutes": budget.get("total_minutes", {}),
+            },
         },
         "zombies": zombies,
+        "budget": budget,
         "cost": {
             "brain": brain_cost,
             "zombies": total_cost,
@@ -1653,11 +1704,16 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
-        self.wfile.write(json.dumps(payload).encode())
+        try:
+            self.wfile.write(json.dumps(payload).encode())
+        except (BrokenPipeError, ConnectionResetError, socket.timeout):
+            pass
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
-        if path == "/api/status":
+        if path == "/api/health":
+            self._send_json({"status": "ok", "project": PROJECT_ROOT.name})
+        elif path == "/api/status":
             self._send_json(build_dashboard_data())
         elif path == "/api/config":
             self._send_json(build_config_response())

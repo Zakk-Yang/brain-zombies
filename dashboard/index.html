@@ -482,6 +482,7 @@ main {
 .phase-iterating { background: rgba(46, 26, 0, 0.86); color: #fcd34d; }
 .phase-unknown { background: rgba(30, 30, 30, 0.9); color: #94a3b8; }
 .zombie-meta { font-size: 0.78rem; color: var(--muted); line-height: 1.7; }
+.budget-exhausted { color: var(--danger); font-weight: 700; }
 .label { color: #65809d; }
 .zombie-summary { font-size: 0.84rem; color: var(--text); margin: 0.6rem 0; padding: 0.55rem 0.7rem; background: rgba(8, 16, 26, 0.9); border-radius: 10px; }
 .zombie-message { font-size: 0.76rem; color: #8fc6ff; margin-top: 0.45rem; font-style: italic; }
@@ -756,8 +757,16 @@ function updateSupervisorField(field, value) {
     if (!appState.draft.supervisor.model || appState.draft.supervisor.model === oldDefault) {
       appState.draft.supervisor.model = defaultModelForRuntime(value);
     }
-  } else if (field === "proactive_check_mins" || field === "zombie_heartbeat_mins") {
-    appState.draft.supervisor[field] = value === "" ? (field === "zombie_heartbeat_mins" ? 10 : 15) : Number(value);
+  } else if (["proactive_check_mins", "zombie_heartbeat_mins", "max_brain_reviews", "max_agent_restarts", "max_total_minutes", "max_agent_iterations"].includes(field)) {
+    const defaults = {
+      proactive_check_mins: 15,
+      zombie_heartbeat_mins: 10,
+      max_brain_reviews: 8,
+      max_agent_restarts: 2,
+      max_total_minutes: 45,
+      max_agent_iterations: 5,
+    };
+    appState.draft.supervisor[field] = value === "" ? defaults[field] : Number(value);
   } else {
     appState.draft.supervisor[field] = value;
   }
@@ -783,6 +792,8 @@ function updateAgentField(index, field, value) {
     }
   } else if (field === "focus") {
     agent.focus = value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
+  } else if (field === "max_iterations") {
+    agent[field] = value === "" ? (appState.draft.supervisor.max_agent_iterations ?? 5) : Number(value);
   } else {
     agent[field] = value;
   }
@@ -804,6 +815,7 @@ function addAgent() {
     focus: [],
     thinking: "",
     role: "",
+    max_iterations: appState.draft.supervisor.max_agent_iterations ?? 5,
     blocked_until: "",
     dependency_mode: "immediate",
     dependency_target: "",
@@ -1103,6 +1115,30 @@ function renderSupervisorStep() {
           <input id="sup-heartbeat" type="number" min="1" step="1" data-action="supervisor-field" data-field="zombie_heartbeat_mins" value="${escapeHtml(supervisor.zombie_heartbeat_mins ?? 10)}" />
           <small>Active zombies must update DuckDB state at least this often.</small>
         </div>
+        <div class="field">
+          <label for="sup-total-mins">Max total run minutes</label>
+          <input id="sup-total-mins" type="number" min="0" step="1" data-action="supervisor-field" data-field="max_total_minutes" value="${escapeHtml(supervisor.max_total_minutes ?? 45)}" />
+          <small>Use 0 for unlimited. Dashboard marks exhaustion when the run exceeds this.</small>
+        </div>
+      </div>
+      <div class="grid two" style="margin-top:0.9rem;">
+        <div class="field">
+          <label for="sup-reviews">Max brain retry actions</label>
+          <input id="sup-reviews" type="number" min="0" step="1" data-action="supervisor-field" data-field="max_brain_reviews" value="${escapeHtml(supervisor.max_brain_reviews ?? 8)}" />
+          <small>Non-accept brain actions stop when this cap is reached. Use 0 for unlimited.</small>
+        </div>
+        <div class="field">
+          <label for="sup-restarts">Max restarts per agent</label>
+          <input id="sup-restarts" type="number" min="0" step="1" data-action="supervisor-field" data-field="max_agent_restarts" value="${escapeHtml(supervisor.max_agent_restarts ?? 2)}" />
+          <small>Prevents repeated CLI restarts after crashes or redirects. Use 0 for unlimited.</small>
+        </div>
+      </div>
+      <div class="grid two" style="margin-top:0.9rem;">
+        <div class="field">
+          <label for="sup-agent-iters">Default max agent review attempts</label>
+          <input id="sup-agent-iters" type="number" min="0" step="1" data-action="supervisor-field" data-field="max_agent_iterations" value="${escapeHtml(supervisor.max_agent_iterations ?? 5)}" />
+          <small>Each agent can override this. Use 0 for unlimited.</small>
+        </div>
       </div>
     </div>
   `;
@@ -1181,6 +1217,13 @@ function renderAgentsStep() {
                   <label>Focus paths</label>
                   <input data-action="agent-field" data-index="${index}" data-field="focus" value="${escapeHtml((agent.focus || []).join(", "))}" />
                   <small>Comma or newline separated paths, for example <code>src/, docs/api.md</code>.</small>
+                </div>
+              </div>
+              <div class="grid two" style="margin-top:0.85rem;">
+                <div class="field">
+                  <label>Max review attempts</label>
+                  <input type="number" min="0" step="1" data-action="agent-field" data-index="${index}" data-field="max_iterations" value="${escapeHtml(agent.max_iterations ?? appState.draft.supervisor.max_agent_iterations ?? 5)}" />
+                  <small>Stops automatic retries after this many ready-for-review submissions. Use 0 for unlimited.</small>
                 </div>
               </div>
               <div class="grid" style="margin-top:0.85rem;">
@@ -1381,6 +1424,13 @@ function phaseClass(phase) {
   return `phase-${phase || "unknown"}`;
 }
 
+function budgetCell(value) {
+  if (!value) return "—";
+  const max = Number(value.max || 0);
+  const text = max ? `${value.used || 0}/${max}` : `${value.used || 0}/∞`;
+  return value.exhausted ? `<span class="budget-exhausted">${escapeHtml(text)}</span>` : escapeHtml(text);
+}
+
 function renderArtifactPanel(title, artifact, open = false) {
   if (!artifact || !artifact.content) return "";
   return `
@@ -1457,6 +1507,8 @@ function renderMonitor() {
         <div class="zombie-meta">
           <span class="label">Tokens:</span> ${(((zombie.input_tokens || 0) + (zombie.cache_write || 0) + (zombie.cache_read || 0) + (zombie.output_tokens || 0)) / 1000).toFixed(1)}k
           · <span class="label">Cost:</span> $${Number(zombie.estimated_cost || 0).toFixed(2)}
+          · <span class="label">Reviews:</span> ${budgetCell(zombie.budget?.iterations)}
+          · <span class="label">Restarts:</span> ${budgetCell(zombie.budget?.restarts)}
         </div>
         <div class="zombie-summary">${escapeHtml(zombie.summary || "No summary")}</div>
         ${zombie.next_step ? `<div class="zombie-meta"><span class="label">Next:</span> ${escapeHtml(zombie.next_step)}</div>` : ""}
@@ -1505,6 +1557,7 @@ function renderMonitor() {
       <div class="stat"><div class="stat-value">${escapeHtml(data.project.elapsed_display)}</div><div class="stat-label">Elapsed</div></div>
       <div class="stat"><div class="stat-value">${escapeHtml(totalTokensK)}k</div><div class="stat-label">Total Tokens</div></div>
       <div class="stat"><div class="stat-value">$${Number(data.cost.total || 0).toFixed(2)}</div><div class="stat-label">Total Cost</div></div>
+      <div class="stat"><div class="stat-value">${budgetCell(data.brain.budget?.brain_reviews)}</div><div class="stat-label">Brain Retries</div></div>
     </div>
 
     <div class="brain-panel">
@@ -1516,7 +1569,7 @@ function renderMonitor() {
         <span><span class="label">Model:</span> ${escapeHtml(data.brain.model_display || data.brain.model || "—")}${data.brain.thinking_mode ? ` · <span style="color:#c4b5fd">⚡${escapeHtml(data.brain.thinking_mode)}</span>` : ' · <span style="color:#64748b">No Thinking</span>'}</span>
       </div>
       <div class="brain-meta" style="margin-top:0.35rem;">
-        <span><span class="label">Tokens:</span> ${((((data.brain.input_tokens || 0) + (data.brain.cache_write || 0) + (data.brain.cache_read || 0) + (data.brain.output_tokens || 0)) / 1000).toFixed(1))}k · <span class="label">Cost:</span> $${Number(data.brain.estimated_cost || 0).toFixed(2)} · <span class="label">Active Requests:</span> ${escapeHtml(data.brain.active_requests || 0)}</span>
+        <span><span class="label">Tokens:</span> ${((((data.brain.input_tokens || 0) + (data.brain.cache_write || 0) + (data.brain.cache_read || 0) + (data.brain.output_tokens || 0)) / 1000).toFixed(1))}k · <span class="label">Cost:</span> $${Number(data.brain.estimated_cost || 0).toFixed(2)} · <span class="label">Active Requests:</span> ${escapeHtml(data.brain.active_requests || 0)} · <span class="label">Run Minutes:</span> ${budgetCell(data.brain.budget?.total_minutes)}</span>
       </div>
       ${data.brain.memory_excerpt ? `<div class="zombie-summary" style="margin-top:0.75rem;"><strong>Brain Memory:</strong> ${escapeHtml(data.brain.memory_excerpt)}</div>` : ""}
       <div class="artifact-stack">

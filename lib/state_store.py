@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from datetime import datetime
@@ -14,6 +15,17 @@ from project_layout import ensure_project_layout, project_paths
 
 
 STATE_SCHEMA_VERSION = 1
+DUCKDB_CONNECT_ATTEMPTS = int(os.environ.get("BZ_DUCKDB_CONNECT_ATTEMPTS", "80"))
+DUCKDB_WRITE_ATTEMPTS = int(os.environ.get("BZ_DUCKDB_WRITE_ATTEMPTS", "80"))
+
+
+def _is_retryable_duckdb_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "lock" in message or "conflict" in message
+
+
+def _duckdb_retry_delay(attempt: int) -> float:
+    return min(0.75, 0.05 * (attempt + 1))
 
 
 def require_duckdb():
@@ -57,17 +69,29 @@ class DuckDBStateStore:
         self.root = Path(root).resolve()
         self.paths = project_paths(self.root)
 
-    def connect(self):
+    def connect(self, read_only: bool = False, attempts: int | None = None):
         duckdb = require_duckdb()
         ensure_project_layout(self.root)
-        return duckdb.connect(str(self.paths.state_db))
-
-    def _write(self, fn: Callable[[Any], Any], attempts: int = 5) -> Any:
+        max_attempts = DUCKDB_CONNECT_ATTEMPTS if attempts is None else attempts
         last_error: Exception | None = None
-        for attempt in range(attempts):
+        for attempt in range(max_attempts):
+            try:
+                return duckdb.connect(str(self.paths.state_db), read_only=read_only)
+            except Exception as exc:  # pragma: no cover - lock timing is environment specific.
+                last_error = exc
+                if not _is_retryable_duckdb_error(exc):
+                    raise
+                time.sleep(_duckdb_retry_delay(attempt))
+        assert last_error is not None
+        raise last_error
+
+    def _write(self, fn: Callable[[Any], Any], attempts: int | None = None) -> Any:
+        max_attempts = DUCKDB_WRITE_ATTEMPTS if attempts is None else attempts
+        last_error: Exception | None = None
+        for attempt in range(max_attempts):
             con = None
             try:
-                con = self.connect()
+                con = self.connect(attempts=1)
                 con.execute("BEGIN TRANSACTION")
                 result = fn(con)
                 con.execute("COMMIT")
@@ -79,9 +103,9 @@ class DuckDBStateStore:
                         con.execute("ROLLBACK")
                 except Exception:
                     pass
-                if "lock" not in str(exc).lower() and "conflict" not in str(exc).lower():
+                if not _is_retryable_duckdb_error(exc):
                     raise
-                time.sleep(0.1 * (attempt + 1))
+                time.sleep(_duckdb_retry_delay(attempt))
             finally:
                 if con is not None:
                     con.close()
@@ -89,7 +113,10 @@ class DuckDBStateStore:
         raise last_error
 
     def initialize(self, agent_ids: Iterable[str] = ()) -> None:
+        agent_ids = [agent_id for agent_id in agent_ids if str(agent_id or "").strip()]
         ensure_project_layout(self.root, agent_ids)
+        if not agent_ids and self.paths.state_db.exists():
+            return
 
         def op(con):
             con.execute(
@@ -333,7 +360,7 @@ class DuckDBStateStore:
 
     def get_agent_state(self, agent_id: str) -> dict[str, Any] | None:
         self.initialize([])
-        con = self.connect()
+        con = self.connect(read_only=True)
         try:
             row = con.execute(
                 """
@@ -373,7 +400,7 @@ class DuckDBStateStore:
 
     def list_agent_ids(self) -> list[str]:
         self.initialize([])
-        con = self.connect()
+        con = self.connect(read_only=True)
         try:
             rows = con.execute("SELECT agent_id FROM agents ORDER BY agent_id").fetchall()
         finally:
@@ -422,7 +449,7 @@ class DuckDBStateStore:
 
     def list_task_events(self, zombie_name: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
         self.initialize([])
-        con = self.connect()
+        con = self.connect(read_only=True)
         try:
             params: list[Any] = []
             where = ""
@@ -495,7 +522,7 @@ class DuckDBStateStore:
 
     def load_actions(self, agent_id: str) -> list[dict[str, Any]]:
         self.initialize([agent_id])
-        con = self.connect()
+        con = self.connect(read_only=True)
         try:
             rows = con.execute(
                 """
@@ -551,7 +578,7 @@ class DuckDBStateStore:
 
     def load_memories(self) -> list[dict[str, Any]]:
         self.initialize([])
-        con = self.connect()
+        con = self.connect(read_only=True)
         try:
             rows = con.execute(
                 """
@@ -603,7 +630,7 @@ class DuckDBStateStore:
 
     def load_events(self, limit: int | None = None) -> list[dict[str, Any]]:
         self.initialize([])
-        con = self.connect()
+        con = self.connect(read_only=True)
         try:
             limit_sql = f"LIMIT {int(limit)}" if limit else ""
             rows = con.execute(

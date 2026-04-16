@@ -41,6 +41,34 @@ class ProjectStateTests(unittest.TestCase):
             )
         )
 
+    def write_budget_config(self, root: Path):
+        (root / "bz.yaml").write_text(
+            "\n".join(
+                [
+                    "project:",
+                    "  name: demo",
+                    "  brief: Build demo",
+                    "supervisor:",
+                    "  runtime: claude",
+                    "  model: sonnet",
+                    "  max_brain_reviews: 1",
+                    "  max_agent_restarts: 1",
+                    "  max_agent_iterations: 1",
+                    "agents:",
+                    "  - id: dev",
+                    "    runtime: claude",
+                    "    model: sonnet",
+                    "    task: Build it",
+                    "    focus: [src/]",
+                    "    max_iterations: 1",
+                    "git:",
+                    "  strategy: worktree",
+                    "  auto_pr: false",
+                    "",
+                ]
+            )
+        )
+
     def test_project_init_creates_canonical_layout(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -57,6 +85,96 @@ class ProjectStateTests(unittest.TestCase):
             self.assertTrue((root / ".bz/project/scheduler/policy.yaml").exists())
             self.assertTrue((root / ".bz/project/state.duckdb").exists())
             self.assertIn("zombie_heartbeat_mins: 10", (root / "bz.yaml").read_text())
+            self.assertIn("max_brain_reviews: 8", (root / "bz.yaml").read_text())
+            self.assertIn("max_agent_iterations: 5", (root / "bz.yaml").read_text())
+
+    def test_agent_iteration_budget_blocks_extra_review_attempts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write_budget_config(root)
+            project_init.initialize_project(root, auto_yes=True)
+
+            first = control_plane.write_state(
+                root,
+                agent_id="dev",
+                phase="ready-for-review",
+                action="requesting review",
+                summary="First attempt ready.",
+                depends_on=[],
+                needs_brain="review",
+                next_step="Brain reviews.",
+                blocker="none",
+                files_touched=["src/app.py"],
+                updated_by="agent",
+                source="test",
+            )
+            self.assertEqual(first["phase"], "ready-for-review")
+
+            control_plane.write_state(
+                root,
+                agent_id="dev",
+                phase="working",
+                action="addressing feedback",
+                summary="Trying again.",
+                depends_on=[],
+                needs_brain="no",
+                next_step="finish retry",
+                blocker="none",
+                files_touched=["src/app.py"],
+                updated_by="agent",
+                source="test",
+            )
+            second = control_plane.write_state(
+                root,
+                agent_id="dev",
+                phase="ready-for-review",
+                action="requesting review again",
+                summary="Second attempt ready.",
+                depends_on=[],
+                needs_brain="review",
+                next_step="Brain reviews.",
+                blocker="none",
+                files_touched=["src/app.py"],
+                updated_by="agent",
+                source="test",
+            )
+
+            self.assertEqual(second["phase"], "blocked")
+            self.assertEqual(second["needs_brain"], "no")
+            self.assertIn("budget exhausted", second["blocker"])
+            self.assertIn("max_iterations reached", second["blocker"])
+
+    def test_brain_action_budget_blocks_extra_retry_actions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write_budget_config(root)
+            project_init.initialize_project(root, auto_yes=True)
+
+            first = control_plane.queue_action(
+                root,
+                from_actor="brain",
+                to_agent="dev",
+                kind="redirect",
+                summary="Fix the first issue.",
+                details="Try again with evidence.",
+                reason="Review failed.",
+            )
+            self.assertEqual(first["kind"], "redirect")
+
+            second = control_plane.queue_action(
+                root,
+                from_actor="brain",
+                to_agent="dev",
+                kind="redirect",
+                summary="Fix another issue.",
+                details="Try again.",
+                reason="Review failed again.",
+            )
+
+            self.assertEqual(second["kind"], "budget-exhausted")
+            state = control_plane.load_state(root, "dev")
+            self.assertEqual(state["phase"], "blocked")
+            self.assertIn("max_brain_reviews reached", state["blocker"])
 
     def test_control_plane_writes_state_task_events_and_memory_mirrors(self):
         with tempfile.TemporaryDirectory() as tmpdir:

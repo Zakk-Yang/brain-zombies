@@ -20,6 +20,20 @@ class RuntimeServicesStaticTests(unittest.TestCase):
         self.assertNotIn('nohup python3 "${SCRIPT_DIR}/dashboard/server.py"', script)
         self.assertNotIn("Start dashboard? [Y/n]", script)
 
+    def test_dashboard_waits_then_opens_browser(self):
+        script = (REPO_ROOT / "bz").read_text()
+        server = (REPO_ROOT / "dashboard" / "server.py").read_text()
+
+        self.assertIn("wait_dashboard_ready", script)
+        self.assertIn('curl -fsS --max-time 1 "${url}/api/health"', script)
+        self.assertIn('path == "/api/health"', server)
+        self.assertIn("open_dashboard_url", script)
+        self.assertIn('open_dashboard_url "$url"', script)
+        self.assertIn("wslview", script)
+        self.assertIn("xdg-open", script)
+        self.assertIn("cmd.exe", script)
+        self.assertIn("BZ_NO_OPEN", script)
+
     def test_dashboard_restarts_reconcile_under_tmux(self):
         server = (REPO_ROOT / "dashboard" / "server.py").read_text()
 
@@ -42,6 +56,17 @@ class RuntimeServicesStaticTests(unittest.TestCase):
         self.assertIn('if state == "ready-for-review":', phase_body)
         self.assertIn('return "ready-for-review"', phase_body)
         self.assertNotIn('"proceed", "unblock"', phase_body)
+
+    def test_dashboard_exposes_budget_controls_and_status(self):
+        server = (REPO_ROOT / "dashboard" / "server.py").read_text()
+        index = (REPO_ROOT / "dashboard" / "index.html").read_text()
+
+        self.assertIn("max_brain_reviews", server)
+        self.assertIn("max_agent_iterations", server)
+        self.assertIn("control_plane.budget_status", server)
+        self.assertIn("budgetCell", index)
+        self.assertIn("Max brain retry actions", index)
+        self.assertIn("Max review attempts", index)
 
 
 if __name__ == "__main__":
