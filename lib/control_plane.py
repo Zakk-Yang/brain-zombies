@@ -790,9 +790,47 @@ def brain_action_budget_exhaustion(root: Path, agent_id: str, kind: str) -> str:
     return ""
 
 
+ARTIFACT_FRESH_SECONDS = 120
+
+
+def agent_has_fresh_artifact(
+    root: Path, agent_id: str, within_seconds: int = ARTIFACT_FRESH_SECONDS
+) -> bool:
+    """True if the agent's output dir has any file modified within the window.
+
+    Used to defer budget-exhaustion blocks when a zombie has just delivered
+    real work — prevents the finish-line block we saw on quality_checker.
+    """
+    out_dir = agent_output_dir(root, agent_id)
+    if not out_dir.exists():
+        return False
+    now_ts = datetime.now().timestamp()
+    for path in out_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if (now_ts - mtime) < within_seconds:
+            return True
+    return False
+
+
 def block_agent_for_budget(root: Path, agent_id: str, reason: str) -> dict[str, Any]:
     current = load_state(root, agent_id)
     if current.get("phase") == "blocked" and "budget exhausted" in flatten_text(current.get("blocker")).lower():
+        return current
+    if agent_has_fresh_artifact(root, agent_id):
+        append_event(
+            root,
+            event_type="budget_exhausted_deferred",
+            source="system",
+            target=f"agent:{agent_id}",
+            summary=f"{agent_id} budget deferred — fresh artifact detected",
+            details=reason,
+            payload={"reason": reason, "window_seconds": ARTIFACT_FRESH_SECONDS},
+        )
         return current
     state = write_state(
         root,
@@ -915,6 +953,45 @@ def pending_targets(root: Path) -> list[str]:
     return targets
 
 
+DUPLICATE_ACTION_WINDOW_SECONDS = 300
+
+
+def recent_duplicate_action(
+    actions: list[dict[str, Any]],
+    from_actor: str,
+    kind: str,
+    summary: str,
+    within_seconds: int = DUPLICATE_ACTION_WINDOW_SECONDS,
+) -> dict[str, Any] | None:
+    """Return a recent action with the same (from, kind, summary) fingerprint.
+
+    Prevents the supervisor from re-issuing an identical order to the same
+    zombie within a short window — the pattern that produced 9 redundant
+    [unblock] commands to quality_checker in the quant-lab-feature-research run.
+    """
+    kind_norm = flatten_text(kind).lower()
+    summary_norm = flatten_text(summary)[:200]
+    from_norm = flatten_text(from_actor).lower()
+    now = datetime.now().astimezone()
+    for action in reversed(actions):
+        if flatten_text(action.get("from")).lower() != from_norm:
+            continue
+        if flatten_text(action.get("kind")).lower() != kind_norm:
+            continue
+        if flatten_text(action.get("summary"))[:200] != summary_norm:
+            continue
+        created = action.get("created_at")
+        if not created:
+            continue
+        try:
+            created_dt = datetime.fromisoformat(created)
+        except ValueError:
+            continue
+        if (now - created_dt).total_seconds() < within_seconds:
+            return action
+    return None
+
+
 def render_action_markdown(action: dict[str, Any]) -> str:
     lines = [
         f"# Action {action.get('id', '')}",
@@ -960,6 +1037,26 @@ def queue_action(
                 "reason": budget_reason,
             }
     actions = load_actions(root, to_agent)
+    if flatten_text(from_actor).lower() == "brain":
+        duplicate = recent_duplicate_action(actions, from_actor, kind, summary)
+        if duplicate is not None:
+            append_event(
+                root,
+                event_type="action_deduped",
+                source=from_actor,
+                target=f"agent:{to_agent}",
+                summary=f"skipped duplicate {flatten_text(kind)}: {flatten_text(summary)}"[:240],
+                details=(
+                    f"Matched action {duplicate.get('id')} "
+                    f"created at {duplicate.get('created_at')}"
+                ),
+                payload={
+                    "kind": flatten_text(kind),
+                    "matched_id": duplicate.get("id"),
+                    "window_seconds": DUPLICATE_ACTION_WINDOW_SECONDS,
+                },
+            )
+            return duplicate
     if replace_pending:
         DuckDBStateStore(root).supersede_pending_actions(to_agent)
         updated = False

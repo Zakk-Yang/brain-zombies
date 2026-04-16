@@ -258,6 +258,102 @@ class ProjectStateTests(unittest.TestCase):
             self.assertIn("Reason: User reported the game could not start.", chatlog)
             self.assertIn("Start the game loop and verify the controls.", chatlog)
 
+    def test_queue_action_dedups_repeated_brain_orders_within_window(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write_config(root)
+            project_init.initialize_project(root, auto_yes=True)
+
+            first = control_plane.queue_action(
+                root,
+                from_actor="brain",
+                to_agent="dev",
+                kind="unblock",
+                summary="Continue the build.",
+                details="Start the game loop.",
+                reason="User reported the game could not start.",
+            )
+
+            second = control_plane.queue_action(
+                root,
+                from_actor="brain",
+                to_agent="dev",
+                kind="unblock",
+                summary="Continue the build.",
+                details="Start the game loop.",
+                reason="Duplicate follow-up.",
+            )
+
+            self.assertEqual(first["id"], second["id"])
+
+            store = DuckDBStateStore(root)
+            actions = store.load_actions("dev")
+            pending_like = [
+                a for a in actions
+                if a.get("status") in {"pending", "delivered", "acknowledged"}
+            ]
+            self.assertEqual(len(pending_like), 1)
+
+            events = store.load_events()
+            deduped = [e for e in events if e.get("type") == "action_deduped"]
+            self.assertEqual(len(deduped), 1)
+            self.assertEqual(deduped[0]["target"], "agent:dev")
+
+            third = control_plane.queue_action(
+                root,
+                from_actor="brain",
+                to_agent="dev",
+                kind="unblock",
+                summary="Continue but with new evidence.",
+                details="New details here.",
+                reason="Different summary should not dedupe.",
+            )
+            self.assertNotEqual(third["id"], first["id"])
+
+    def test_budget_block_deferred_when_agent_has_fresh_artifact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.write_budget_config(root)
+            project_init.initialize_project(root, auto_yes=True)
+
+            first = control_plane.queue_action(
+                root,
+                from_actor="brain",
+                to_agent="dev",
+                kind="redirect",
+                summary="First pass.",
+                details="Work on it.",
+                reason="Initial.",
+            )
+            self.assertEqual(first["kind"], "redirect")
+
+            # Agent produces a fresh artifact before the next brain action.
+            out_dir = root / ".bz/project/outputs/dev"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "report.md").write_text("final deliverable\n")
+
+            phase_before = control_plane.load_state(root, "dev").get("phase")
+
+            second = control_plane.queue_action(
+                root,
+                from_actor="brain",
+                to_agent="dev",
+                kind="redirect",
+                summary="Second pass.",
+                details="Follow up.",
+                reason="Second time.",
+            )
+            self.assertEqual(second["kind"], "budget-exhausted")
+
+            state = control_plane.load_state(root, "dev")
+            self.assertEqual(state.get("phase"), phase_before)
+            self.assertNotIn("budget exhausted", control_plane.flatten_text(state.get("blocker") or "").lower())
+
+            events = DuckDBStateStore(root).load_events()
+            deferred = [e for e in events if e.get("type") == "budget_exhausted_deferred"]
+            self.assertEqual(len(deferred), 1)
+            self.assertEqual(deferred[0]["target"], "agent:dev")
+
     def test_sync_status_preserves_newer_canonical_state_behind_pending_action(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

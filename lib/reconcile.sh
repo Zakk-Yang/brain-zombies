@@ -31,8 +31,11 @@ SHARED_MEMORY_FILE="${MEMORY_DIR}/shared_mem.md"
 SCAN_INTERVAL=30
 PROACTIVE_INTERVAL=900   # 15 min default
 HEARTBEAT_INTERVAL=600   # 10 min without state heartbeat = stalled
+BRAIN_ERROR_THRESHOLD=3          # consecutive failures before suppressing a trigger
+BRAIN_ERROR_SUPPRESS_WINDOW=1800 # 30 min suppression window
+BRAIN_ERRORS_DIR="${LOG_DIR}/.brain-errors"
 
-mkdir -p "$LOG_DIR" "$MEMORY_DIR"
+mkdir -p "$LOG_DIR" "$MEMORY_DIR" "$BRAIN_ERRORS_DIR"
 
 # Read config
 if [[ -f "${PROJECT_ROOT}/bz.yaml" ]]; then
@@ -164,6 +167,55 @@ shutdown_budget_exhausted_run() {
 
     rm -f "${BZ_DIR}/reconcile.pid"
     exit 0
+}
+
+# ── Brain error circuit breaker ──────────────────
+# Prevents the supervisor loop from re-firing the same wake trigger after the
+# brain CLI has failed repeatedly — the pattern that burned 168 consecutive
+# [BRAIN ERROR] responses in the quant-lab-feature-research run.
+
+brain_trigger_key() {
+    local mode="$1"
+    local reason="$2"
+    printf '%s|%s' "$mode" "$reason" | head -c 400 | md5sum 2>/dev/null | awk '{print $1}'
+}
+
+brain_trigger_error_file() {
+    echo "${BRAIN_ERRORS_DIR}/$1"
+}
+
+brain_trigger_suppressed() {
+    local key="$1"
+    local file
+    file="$(brain_trigger_error_file "$key")"
+    [[ -f "$file" ]] || return 1
+    local now
+    now="$(date +%s)"
+    local kept=""
+    local count=0
+    while IFS= read -r epoch; do
+        [[ -z "$epoch" ]] && continue
+        if [[ "$((now - epoch))" -lt "$BRAIN_ERROR_SUPPRESS_WINDOW" ]]; then
+            kept+="${epoch}"$'\n'
+            count=$((count + 1))
+        fi
+    done < "$file"
+    if [[ -z "$kept" ]]; then
+        rm -f "$file"
+    else
+        printf '%s' "$kept" > "$file"
+    fi
+    [[ "$count" -ge "$BRAIN_ERROR_THRESHOLD" ]]
+}
+
+brain_trigger_record_failure() {
+    local key="$1"
+    mkdir -p "$BRAIN_ERRORS_DIR"
+    date +%s >> "$(brain_trigger_error_file "$key")"
+}
+
+brain_trigger_clear() {
+    rm -f "$(brain_trigger_error_file "$1")" 2>/dev/null || true
 }
 
 ensure_brain_memory() {
@@ -1205,6 +1257,13 @@ print(d.get('supervisor',{}).get('thinking',''))
         *) brain_cli="$brain_runtime" ;;
     esac
 
+    local trigger_key
+    trigger_key="$(brain_trigger_key "$mode" "$reason")"
+    if [[ -n "$trigger_key" ]] && brain_trigger_suppressed "$trigger_key"; then
+        log "Suppressing brain wake for mode=${mode} reason=${reason} — ${BRAIN_ERROR_THRESHOLD}+ consecutive BRAIN ERROR responses in last $((BRAIN_ERROR_SUPPRESS_WINDOW/60))m. Extend bz.yaml or clear ${BRAIN_ERRORS_DIR}/${trigger_key} to retry."
+        return 0
+    fi
+
     echo "[brain] $(date '+%H:%M:%S') WAKE (${mode}):${reason}"
     append_brain_memory "wake ${mode}" "Reason: ${reason}"
 
@@ -1249,7 +1308,10 @@ print(d.get('supervisor',{}).get('thinking',''))
         deliver_action_to_agent "$target"
     done <<< "$queued_targets"
 
-    if [[ "$brain_output" != "BRAIN ERROR" ]]; then
+    if [[ "$brain_output" == "BRAIN ERROR" ]]; then
+        [[ -n "$trigger_key" ]] && brain_trigger_record_failure "$trigger_key"
+    else
+        [[ -n "$trigger_key" ]] && brain_trigger_clear "$trigger_key"
         rm -f "$brain_prompt_file" "$brain_output_file" "$brain_error_file"
     fi
 

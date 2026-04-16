@@ -88,6 +88,20 @@ class ReconcileStaticTests(unittest.TestCase):
         self.assertIn('phase_expects_live_session "$state" || continue', crash_body)
         self.assertNotIn('[[ "$state" == "done" || "$state" == "finished" ]]', crash_body)
 
+    def test_brain_error_circuit_breaker_suppresses_repeated_failures(self):
+        script = (REPO_ROOT / "lib" / "reconcile.sh").read_text()
+
+        self.assertIn("BRAIN_ERROR_THRESHOLD=3", script)
+        self.assertIn("BRAIN_ERROR_SUPPRESS_WINDOW=1800", script)
+        self.assertIn("brain_trigger_key()", script)
+        self.assertIn("brain_trigger_suppressed()", script)
+        self.assertIn("brain_trigger_record_failure()", script)
+        self.assertIn("brain_trigger_clear()", script)
+        self.assertIn('if [[ -n "$trigger_key" ]] && brain_trigger_suppressed "$trigger_key"; then', script)
+        self.assertIn('Suppressing brain wake for mode=${mode} reason=${reason}', script)
+        self.assertIn('brain_trigger_record_failure "$trigger_key"', script)
+        self.assertIn('brain_trigger_clear "$trigger_key"', script)
+
     def test_reconcile_enforces_total_runtime_budget_and_gates_proactive_wakes(self):
         script = (REPO_ROOT / "lib" / "reconcile.sh").read_text()
 
